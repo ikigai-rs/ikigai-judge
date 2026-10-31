@@ -16,3 +16,25 @@ categories = ["wasm", "text-processing"]
 # links exactly one `ikigai-core`. 0.2.10 is the newest published. ⚠ `"0.2.10"` is also a
 # ceiling below 0.3.0.
 ikigai-core = "0.2.10"
+# Reading the stored Turtle atoms back. Both are wasm-clean; in the browser oxrdf's `rand`
+# needs getrandom's JS backend (below), as in ikigai-core's `declare` feature.
+oxrdf = "0.3"
+oxttl = "0.2"
+# The `items` input, the model's JSON envelope and the JSON faces. Its parser refuses nesting
+# past 128 levels, which bounds the only recursive parse of request input here.
+serde_json = "1"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# Since getrandom 0.3.4 the `wasm_js` feature alone selects the browser backend: no rustflags.
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+# The test host: ikigai-fs `cacheable_space` over a scratch state root, an in-memory bayes
+# model, `ikigai-vocab`'s Meta face, and the module recipe (`ikigai-conformance`) as one test.
+# The judge itself links none of them: it reaches each through the kernel by name.
+futures = "0.3"
+ikigai-bayes = "0.3.0"
+ikigai-conformance = "0.12.1"
+ikigai-fs = "0.3.0"
+ikigai-vocab = "0.2.10"
+serde_json = "1"
