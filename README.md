@@ -163,6 +163,10 @@ with `Kernel::is_cached`). `tests/conformance.rs` runs
 [`ikigai-conformance`](https://github.com/ikigai-rs/ikigai-conformance) 0.12 over every door:
 zero findings, nothing unprobed. CI also lints the lib on `wasm32-unknown-unknown`.
 
+## Accessibility
+
+The text faces, the `why` HTML page and the refusals this crate writes, the rules they follow, how they are tested and their known limitations are in [ACCESSIBILITY.md](ACCESSIBILITY.md). Report a barrier with an issue carrying the `accessibility` label.
+
 ## License
 
 MIT or Apache-2.0, at your option.
