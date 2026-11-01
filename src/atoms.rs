@@ -7,6 +7,8 @@
 //! model/{q}/last/{item}.ttl                the item's last digest the judge judged
 //! model/{q}/spent/{source}/{date}.ttl      model calls spent that day
 //! model/{q}/reserved/{classifier}/{digest}.ttl  a model call reserved before asking
+//! model/{q}/reserved/{classifier}/{digest}.failed.ttl   how that call failed, if it did
+//! model/{q}/reserved/{classifier}/{digest}.cleared.ttl  the curators' clears, appended
 //! person/{principal}/{q}/{digest}.ttl      a person's latest correction (their corridor)
 //! person/{principal}/{q}/last/{item}.ttl   the item's last digest that person corrected
 //! ```
@@ -31,6 +33,7 @@ const OA: &str = "http://www.w3.org/ns/oa#";
 const DCTERMS: &str = "http://purl.org/dc/terms/";
 const SCHEMA: &str = "https://schema.org/";
 const PROV: &str = "http://www.w3.org/ns/prov#";
+const JUDGE: &str = "urn:iki:judge:vocab:";
 
 // --- paths --------------------------------------------------------------------------------
 
@@ -40,6 +43,14 @@ pub fn model_path(q: &str, classifier: &str, digest: &str) -> String {
 
 pub fn reservation_path(q: &str, classifier: &str, digest: &str) -> String {
     format!("urn:file:model/{q}/reserved/{classifier}/{digest}.ttl")
+}
+
+pub fn failure_path(q: &str, classifier: &str, digest: &str) -> String {
+    format!("urn:file:model/{q}/reserved/{classifier}/{digest}.failed.ttl")
+}
+
+pub fn cleared_path(q: &str, classifier: &str, digest: &str) -> String {
+    format!("urn:file:model/{q}/reserved/{classifier}/{digest}.cleared.ttl")
 }
 
 pub fn model_last_path(q: &str, item: &str) -> String {
@@ -153,12 +164,95 @@ pub fn last_turtle(name: &str, item: &str, digest: &str) -> String {
 }
 
 /// A durable attempt marker, kept even if the model call or its verdict write fails.
-/// It is not a verdict: an uncertain outcome must never become an invented label.
-pub fn reservation_turtle(name: &str, verdict: &str, created: &str) -> String {
-    format!(
+/// It is not a verdict: an uncertain outcome must never become an invented label. `attempt`
+/// counts the calls reserved for the item, so a failure names the attempt it ended; a
+/// curator's clear rewrites it with who cleared it and when.
+pub fn reservation_turtle(
+    name: &str,
+    verdict: &str,
+    created: &str,
+    attempt: u32,
+    cleared: Option<(&str, &str)>,
+) -> String {
+    let mut out = format!(
         "{PREFIXES}<{name}> a prov:Activity ;\n  dcterms:subject <{verdict}> ;\n  \
-         dcterms:created \"{created}\"^^xsd:dateTime .\n"
+         dcterms:created \"{created}\"^^xsd:dateTime ;\n  \
+         schema:position \"{attempt}\"^^xsd:integer"
+    );
+    if let Some((by, at)) = cleared {
+        out.push_str(&format!(
+            " ;\n  <{JUDGE}clearedBy> <{by}> ;\n  <{JUDGE}clearedAt> \"{at}\"^^xsd:dateTime"
+        ));
+    }
+    out.push_str(" .\n");
+    out
+}
+
+/// A reservation as stored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reservation {
+    pub created: String,
+    /// 1 for a reservation written before attempts were counted.
+    pub attempt: u32,
+    /// `(principal, time)` of a curator's clear.
+    pub cleared: Option<(String, String)>,
+}
+
+/// How a reserved model call failed. `charged` is `yes` when the model answered (so the
+/// provider billed the call) and `unknown` when the call itself failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub attempt: u32,
+    pub created: String,
+    pub classifier: String,
+    pub kind: String,
+    pub message: String,
+    pub charged: String,
+    pub retry_at: String,
+}
+
+pub fn failure_turtle(name: &str, reservation: &str, f: &Failure) -> String {
+    format!(
+        "{PREFIXES}<{name}> a prov:Activity ;\n  dcterms:subject <{reservation}> ;\n  \
+         schema:position \"{attempt}\"^^xsd:integer ;\n  \
+         dcterms:created \"{created}\"^^xsd:dateTime ;\n  \
+         schema:identifier \"{classifier}\" ;\n  schema:error \"{kind}\" ;\n  \
+         schema:description \"{message}\" ;\n  <{JUDGE}charged> \"{charged}\" ;\n  \
+         <{JUDGE}retryAt> \"{retry_at}\"^^xsd:dateTime .\n",
+        attempt = f.attempt,
+        created = f.created,
+        classifier = f.classifier,
+        kind = escape(&f.kind),
+        message = escape(&f.message),
+        charged = f.charged,
+        retry_at = f.retry_at,
     )
+}
+
+/// One curator's clear, appended to the item's log: who, when, the attempt it cleared and
+/// the failure it cleared, if one was recorded.
+pub fn cleared_turtle(
+    name: &str,
+    reservation: &str,
+    by: &str,
+    at: &str,
+    attempt: u32,
+    failure: Option<&Failure>,
+) -> String {
+    let mut out = format!(
+        "{PREFIXES}<{name}> a prov:Activity ;\n  dcterms:subject <{reservation}> ;\n  \
+         dcterms:creator <{by}> ;\n  dcterms:created \"{at}\"^^xsd:dateTime ;\n  \
+         schema:position \"{attempt}\"^^xsd:integer"
+    );
+    if let Some(f) = failure {
+        out.push_str(&format!(
+            " ;\n  schema:error \"{}\" ;\n  schema:description \"{}\"",
+            escape(&f.kind),
+            escape(&f.message)
+        ));
+    }
+    out.push_str(" .\n");
+    out
 }
 
 /// Model calls spent.
@@ -239,6 +333,45 @@ pub fn parse_last(text: &str, name: &str) -> Result<String> {
         .ok_or_else(|| Error::Endpoint(format!("the atom for <{name}> has no digest")))
 }
 
+fn position(ts: &[(String, String, Term)], name: &str) -> Option<u32> {
+    object(ts, name, &format!("{SCHEMA}position"))
+        .map(as_text)
+        .and_then(|n| n.parse().ok())
+}
+
+/// Read a reservation atom.
+pub fn parse_reservation(text: &str, name: &str) -> Result<Reservation> {
+    let ts = triples(text)?;
+    let text_of = |p: &str| object(&ts, name, p).map(as_text);
+    let cleared = text_of(&format!("{JUDGE}clearedBy")).zip(text_of(&format!("{JUDGE}clearedAt")));
+    Ok(Reservation {
+        created: text_of(&format!("{DCTERMS}created")).unwrap_or_default(),
+        attempt: position(&ts, name).unwrap_or(1),
+        cleared,
+    })
+}
+
+/// Read a failure atom.
+pub fn parse_failure(text: &str, name: &str) -> Result<Failure> {
+    let ts = triples(text)?;
+    let text_of = |p: &str| object(&ts, name, p).map(as_text).unwrap_or_default();
+    let failure = Failure {
+        attempt: position(&ts, name).unwrap_or(0),
+        created: text_of(&format!("{DCTERMS}created")),
+        classifier: text_of(&format!("{SCHEMA}identifier")),
+        kind: text_of(&format!("{SCHEMA}error")),
+        message: text_of(&format!("{SCHEMA}description")),
+        charged: text_of(&format!("{JUDGE}charged")),
+        retry_at: text_of(&format!("{JUDGE}retryAt")),
+    };
+    if millis_of(&failure.retry_at).is_none() {
+        return Err(Error::Endpoint(format!(
+            "the atom for <{name}> has no retry time"
+        )));
+    }
+    Ok(failure)
+}
+
 /// Read a spent atom: the count.
 pub fn parse_spent(text: &str, name: &str) -> Result<u32> {
     let ts = triples(text)?;
@@ -293,6 +426,39 @@ pub fn date_time(millis: u64) -> (String, String) {
     (date, time)
 }
 
+/// Milliseconds since the epoch for a `YYYY-MM-DDThh:mm:ss.sssZ` [`date_time`] wrote.
+pub fn millis_of(text: &str) -> Option<u64> {
+    let b = text.as_bytes();
+    if b.len() != 24 || &text[4..5] != "-" || &text[7..8] != "-" || &text[10..11] != "T" {
+        return None;
+    }
+    if &text[13..14] != ":" || &text[16..17] != ":" || &text[19..20] != "." || &text[23..] != "Z" {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| -> Option<i64> {
+        let part = &text[r];
+        part.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (hh, mm, ss, ms) = (n(11..13)?, n(14..16)?, n(17..19)?, n(20..23)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    // Howard Hinnant's days_from_civil.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hh * 3600 + mm * 60 + ss;
+    u64::try_from(secs * 1000 + ms).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +469,42 @@ mod tests {
         // 2026-10-31T10:50:17.123Z
         assert_eq!(date_time(1_793_443_817_123).1, "2026-10-31T10:50:17.123Z");
         assert_eq!(date_time(951_782_400_000).0, "2000-02-29");
+        for millis in [0, 951_782_400_000, 1_793_443_817_123, 4_102_444_799_999] {
+            assert_eq!(millis_of(&date_time(millis).1), Some(millis));
+        }
+        assert_eq!(millis_of("2026-10-31"), None);
+        assert_eq!(millis_of("2026-13-31T00:00:00.000Z"), None);
+    }
+
+    #[test]
+    fn reservation_and_failure_atoms_read_back() {
+        let r = "urn:file:r";
+        let old = format!(
+            "{PREFIXES}<{r}> a prov:Activity ;\n  dcterms:subject <urn:v> ;\n  \
+             dcterms:created \"2026-10-31T00:00:00.000Z\"^^xsd:dateTime .\n"
+        );
+        assert_eq!(
+            parse_reservation(&old, r).unwrap().attempt,
+            1,
+            "a PR 4 atom"
+        );
+        let cleared = reservation_turtle(r, "urn:v", "t", 3, Some(("urn:x:c", "t2")));
+        let back = parse_reservation(&cleared, r).unwrap();
+        assert_eq!(back.attempt, 3);
+        assert_eq!(back.cleared, Some(("urn:x:c".into(), "t2".into())));
+        let f = Failure {
+            attempt: 2,
+            created: "2026-10-31T00:00:00.000Z".into(),
+            classifier: "c".into(),
+            kind: "timeout".into(),
+            message: "said \"no\"\n".into(),
+            charged: "unknown".into(),
+            retry_at: "2026-10-31T01:00:00.000Z".into(),
+        };
+        assert_eq!(
+            parse_failure(&failure_turtle("urn:f", r, &f), "urn:f").unwrap(),
+            f
+        );
     }
 
     #[test]

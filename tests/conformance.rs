@@ -8,7 +8,7 @@ use common::*;
 use ikigai_conformance::{Expected, Fixture, Suite};
 use ikigai_core::Verb;
 
-const OURS: [&str; 12] = [
+const OURS: [&str; 13] = [
     "question",
     "prompt",
     "classifier",
@@ -19,6 +19,7 @@ const OURS: [&str; 12] = [
     "pending",
     "disagreements",
     "spent",
+    "reservation",
     "judge",
     "correct",
 ];
@@ -46,9 +47,17 @@ fn walk() -> ikigai_conformance::Report {
         "pending",
         "disagreements",
         "spent",
+        "reservation",
     ] {
         suite = suite.cacheable(format!("judge-{Q}-{part}"));
     }
+    // The walk fires a mutating action only through a `content` pipe, which a clear has
+    // none of; its outputs and refusals are `tests/retry.rs`.
+    suite = suite.opt_out(
+        format!("judge-{Q}-reservation"),
+        Some(Verb::Delete),
+        "a curator's clear takes no content; tests/retry.rs fires it",
+    );
     h.judge(text, &[]).unwrap();
     h.correct_as(&ikigai_core::Capability::root(), text, "ham", &[]);
     let classifier = h.text(Verb::Source, &format!("urn:iki:judge:classifier:{Q}"), &[]);
@@ -81,6 +90,11 @@ fn walk() -> ikigai_conformance::Report {
             Fixture::new(format!("judge-{Q}-spent"), Verb::Source)
                 .binding("source", "form")
                 .binding("date", "2026-10-31"),
+        )
+        .fixture(
+            Fixture::new(format!("judge-{Q}-reservation"), Verb::Source)
+                .binding("classifier", &classifier)
+                .binding("digest", &digest),
         )
         .fixture(
             Fixture::new(format!("judge-{Q}-judge"), Verb::Sink)

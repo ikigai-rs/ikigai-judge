@@ -4,15 +4,15 @@
 #![allow(dead_code)] // each test binary uses a different subset
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 use ikigai_bayes::{Bayes, ModelConfig};
 use ikigai_core::{
-    principal_scope, ArgRef, ArgSpec, AsyncFnEndpoint, Capability, Description, EndpointSpace,
-    Exact, Fallback, FixedClock, Iri, Kernel, ReprType, Representation, Request, Result, Space,
-    Verb,
+    principal_scope, ArgRef, ArgSpec, AsyncFnEndpoint, Capability, Clock, Description,
+    EndpointSpace, Error, Exact, Fallback, Iri, Kernel, ReprType, Representation, Request, Result,
+    Space, Time, Verb,
 };
 use ikigai_judge::Question;
 
@@ -24,6 +24,21 @@ pub const BOB: &str = "urn:example:bob";
 /// 2026-10-31T10:50:17.123Z
 pub const NOW: u64 = 1_793_443_817_123;
 
+/// A clock the test moves: it starts at [`NOW`].
+pub struct TestClock(AtomicU64);
+
+impl TestClock {
+    pub fn advance(&self, by: std::time::Duration) {
+        self.0.fetch_add(by.as_millis() as u64, Ordering::SeqCst);
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> Time {
+        Time::from_millis(self.0.load(Ordering::SeqCst))
+    }
+}
+
 /// What the fake model answers, and how often it was asked.
 #[derive(Default)]
 pub struct Fake {
@@ -31,6 +46,8 @@ pub struct Fake {
     pub model: Mutex<String>,
     pub calls: AtomicUsize,
     pub gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    /// Errors the next calls fail with, in order, after counting the call.
+    pub failures: Mutex<Vec<Error>>,
 }
 
 impl Fake {
@@ -39,6 +56,10 @@ impl Fake {
     }
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+    /// The next call fails with `error`.
+    pub fn fail_next(&self, error: Error) {
+        self.failures.lock().unwrap().push(error);
     }
 }
 
@@ -63,6 +84,13 @@ pub fn fake_llm(fake: Arc<Fake>) -> AsyncFnEndpoint {
                 }
             })
             .await;
+            let failure = {
+                let mut failures = fake.failures.lock().unwrap();
+                (!failures.is_empty()).then(|| failures.remove(0))
+            };
+            if let Some(error) = failure {
+                return Err(error);
+            }
             assert_eq!(inv.inline_str("temperature")?, "0", "temperature 0");
             assert_eq!(
                 inv.inline_str("model")?,
@@ -172,6 +200,7 @@ impl Space for Yielding {
 
 pub struct Host {
     pub kernel: Kernel,
+    pub clock: Arc<TestClock>,
     pub fake: Arc<Fake>,
     pub root: Scratch,
     pub judge: Arc<EndpointSpace>,
@@ -217,11 +246,13 @@ impl Host {
             ),
         ];
         let root_space = Arc::new(Fallback::new(spaces));
+        let clock = Arc::new(TestClock(AtomicU64::new(NOW)));
         let kernel =
             Kernel::with_meta_renderer(root_space.clone(), Arc::new(ikigai_vocab::TurtleRenderer))
-                .with_clock(Arc::new(FixedClock::at(NOW)));
+                .with_clock(clock.clone());
         Host {
             kernel,
+            clock,
             fake,
             root,
             judge,
