@@ -7,7 +7,9 @@
 //! model endpoint) run under the CALLER's capability, so the path ACL on the state root is the
 //! second floor: the judge's caller writes `/model`, a reviewer their own `/person/{key}`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use ikigai_core::{
     ArgRef, ArgSpec, AsyncFnEndpoint, Description, EndpointSpace, Error, Exact, FailureClass,
@@ -202,11 +204,11 @@ fn describe(
         .verb(verb)
         .verb(Verb::Meta)
         // A wrong request or state (InvalidArgument, NotFound, Conflict), a stored atom that
-        // does not parse (Unknown); the judge adds OverBudget.
+        // does not parse (Unknown); the judge adds RetryAfter.
         .fails(FailureClass::Permanent)
         .fails(FailureClass::Unknown);
     if verb == Verb::Sink && name.ends_with("-judge") {
-        d = d.fails(FailureClass::OverBudget);
+        d = d.fails(FailureClass::RetryAfter);
     }
     if let Some(cap) = cap {
         d = d.requires(cap);
@@ -1216,7 +1218,30 @@ fn parse_label<'a>(q: &'a Question, text: &str) -> Option<&'a crate::Label> {
     q.label(named.trim())
 }
 
+type BudgetLock = futures::lock::Mutex<()>;
+type BudgetLockMap = HashMap<(String, String), Weak<BudgetLock>>;
+
+/// One reservation lock per source and UTC date, shared by all calls to this question's
+/// endpoint. Weak entries keep old days and inactive sources from accumulating forever.
+#[derive(Default)]
+struct BudgetLocks(Mutex<BudgetLockMap>);
+
+impl BudgetLocks {
+    fn for_day(&self, source: &str, date: &str) -> Arc<BudgetLock> {
+        let mut locks = self.0.lock().expect("budget lock registry poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let key = (source.to_string(), date.to_string());
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(futures::lock::Mutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    }
+}
+
 fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
+    let budget_locks = Arc::new(BudgetLocks::default());
     let n = q.name.clone();
     let mut inputs = item_inputs(true);
     inputs.push(as_spec(&PLAIN_FACES));
@@ -1225,7 +1250,7 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
         &format!("Judge an item for `{n}` with the pinned model"),
         "Idempotent: if the item's class is not `pending` (and not stale), answers it and writes \
          nothing; a model verdict already recorded for the current classifier (even unparsed) \
-         is never asked again. Otherwise checks the source's daily budget (OverBudget past it; \
+         is never asked again. Otherwise checks the source's daily budget (RetryAfter past it; \
          the item stays pending), asks `urn:llm:<provider>:ask` (the pinned model, temperature \
          0, JSON), refuses an answer naming another model (Conflict), and records the model \
          verdict atom: the label, or an unparsed verdict with the raw text.",
@@ -1236,6 +1261,7 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
     );
     AsyncFnEndpoint::new(format!("judge-{n}-judge"), move |inv| {
         let q = q.clone();
+        let budget_locks = budget_locks.clone();
         Box::pin(async move {
             let face = face(inv, &PLAIN_FACES)?;
             let item = item_of(inv, true)?;
@@ -1261,9 +1287,17 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
                 return Ok(reply("unchanged", None, "unparsed"));
             }
             let (date, created) = now(inv)?;
+            // Reserve under an async lock: no caller of this endpoint can observe the
+            // same count before its predecessor's increment has been persisted. This is
+            // endpoint-local; separate processes sharing atoms need storage-level CAS.
+            let budget_lock = budget_locks.for_day(&source, &date);
+            let reservation = budget_lock.lock().await;
             let used = spent(inv, &q, &source, &date).await?;
             if used >= q.budget {
-                return Err(Error::OverBudget {
+                return Err(Error::RetryAfter {
+                    delay: inv.now().map(|t| {
+                        Duration::from_millis(86_400_000 - t.as_millis() % 86_400_000)
+                    }),
                     detail: format!(
                         "source `{source}` has spent {used} of its {} model calls for {date}; the \
                          item stays pending",
@@ -1278,6 +1312,7 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
                 &atoms::spent_turtle(&spent_name(&q.name, &source, &date), used + 1),
             )
             .await?;
+            drop(reservation);
             let endpoint = format!("urn:llm:{}:ask", q.provider);
             let prompt = format!("{}\n\n{}", q.prompt, item.content);
             let system = instructions(&q);

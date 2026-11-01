@@ -53,7 +53,7 @@ any page a host puts the text faces in.
 
 - `tests/judge.rs`: `why_has_text_turtle_and_html_faces` (the page starts `<!doctype html>`, the
   text face starts `class `), `a_text_past_the_bound_is_refused_not_truncated`,
-  `past_the_budget_the_judge_refuses_over_budget_and_the_item_stays_pending`,
+  `past_the_budget_the_judge_refuses_until_tomorrow_and_the_item_stays_pending`,
   `a_digest_that_is_not_the_texts_is_refused`, and the producer tests that check each class line.
 - Nothing tests the HTML page's structure beyond its first line. **No automated accessibility
   checker, browser or assistive technology has been used on this output.**

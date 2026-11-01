@@ -73,7 +73,7 @@ an optional `item` (its IRI) and `source`; a `{digest}` that is not the content'
 
 Idempotent. If the class is not `pending` (and not stale), it answers the class and writes
 nothing. A verdict already recorded for the current classifier, even an unparsed one, is never
-asked again. Otherwise it checks the source's daily budget (past it: `OverBudget`, the item
+asked again. Otherwise it checks the source's daily budget (past it: `RetryAfter`, the item
 stays `pending`, nothing is called and nothing is truncated), spends one call, asks
 `urn:llm:<provider>:ask` (the pinned model, temperature 0, the label set in the system prompt,
 the JSON envelope), and:
@@ -141,14 +141,18 @@ Every bound refuses; none truncates.
 |---|---|---|
 | an item's text | 64 KiB (`MAX_TEXT_BYTES`, bayes's message bound) | `InvalidArgument` on `content` |
 | items per `pending` / `disagreements` call | 1000 (`MAX_ITEMS`) | `InvalidArgument` on `items` |
-| model calls per source per day | the question's budget | `OverBudget` |
+| model calls per source per day | the question's budget | `RetryAfter` |
 | raw answer kept in an unparsed verdict | 4096 bytes | kept as its length and digest instead |
 
 The only recursive parse of request input is `items` and the model's envelope, by
 `serde_json`, which refuses nesting past 128 levels.
 
-⚠ The budget check reads then writes the day's count; two judges racing on one source can
-both pass the last call. Run one worker per question (the worker loop does).
+The judge endpoint serializes each source's daily budget check and increment, reserving a
+call before asking the model. It releases the lock before the model request. Refusals return
+`RetryAfter` with the delay until the next UTC day. Failed calls still spend their reservation.
+This coordination covers concurrent calls sharing one endpoint instance. Separate endpoint
+instances or processes sharing the same atoms still require external coordination, such as
+one worker per question, or storage-level compare-and-set.
 
 ## Tests
 
