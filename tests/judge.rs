@@ -774,3 +774,97 @@ fn why_has_text_turtle_and_html_faces() {
     let plain = h.text(Verb::Source, &iri, &[("content", text)]);
     assert!(plain.starts_with("class "), "{plain}");
 }
+
+// --- concurrent corrections ---------------------------------------------------------------
+
+/// The shared verdict's label, and whether bayes holds the same text under it: re-training
+/// with the recorded label is `unchanged` only when bayes already agrees.
+fn verdict_and_bayes_agree(h: &Host, content: &str) -> (String, bool) {
+    let class = h.class(content, &[]);
+    let label = class.split_whitespace().next().unwrap().to_string();
+    assert_eq!(class, format!("{label} person-shared\n"));
+    let trained = h.text(
+        Verb::Sink,
+        &format!("urn:bayes:{Q}:train"),
+        &[("content", content), ("label", &label)],
+    );
+    (label, trained.starts_with("unchanged "))
+}
+
+/// Two curators re-correct one item at once with different labels. The first pauses after
+/// its last-digest write (between the atom and the train); the second, naming no item, writes
+/// its atom and trains in that gap. The shared verdict and bayes must still name one label.
+#[test]
+fn concurrent_recorrections_leave_the_verdict_and_bayes_agreeing() {
+    let h = Host::with_yielding_person_last(question());
+    let content = "a message two curators disagree about";
+    let cap = h.curator("urn:example:curator");
+    h.correct_as(&cap, content, "spam", &[("item", "urn:example:item:1")]);
+    let iri = format!("urn:iki:judge:correct:{Q}");
+    let first = request(
+        Verb::Sink,
+        &iri,
+        &[
+            ("content", content),
+            ("label", "ham"),
+            ("item", "urn:example:item:1"),
+        ],
+    );
+    let second = request(Verb::Sink, &iri, &[("content", content), ("label", "spam")]);
+    let (a, b) = futures::executor::block_on(futures::future::join(
+        h.kernel.issue(first, &cap),
+        h.kernel.issue(second, &cap),
+    ));
+    a.unwrap();
+    b.unwrap();
+    let (label, agree) = verdict_and_bayes_agree(&h, content);
+    assert!(
+        agree,
+        "the shared verdict is {label}, but bayes holds the other label"
+    );
+}
+
+/// The same race on real threads, many rounds: no round may leave them disagreeing.
+#[test]
+fn threaded_recorrections_leave_the_verdict_and_bayes_agreeing() {
+    const ROUNDS: usize = 30;
+    const CALLERS: usize = 8;
+    let mut divergent = 0;
+    let errors = std::sync::atomic::AtomicUsize::new(0);
+    for round in 0..ROUNDS {
+        let h = Host::with_yielding_person_last(question());
+        let content = format!("a contested message {round}");
+        let cap = h.curator("urn:example:curator");
+        h.correct_as(&cap, &content, "spam", &[("item", "urn:example:item:1")]);
+        let barrier = std::sync::Barrier::new(CALLERS);
+        std::thread::scope(|scope| {
+            for n in 0..CALLERS {
+                let (h, cap, content, barrier, errors) = (&h, &cap, &content, &barrier, &errors);
+                scope.spawn(move || {
+                    let label = if n % 2 == 0 { "ham" } else { "spam" };
+                    let item: &[(&str, &str)] = if n % 4 < 2 {
+                        &[("item", "urn:example:item:1")]
+                    } else {
+                        &[]
+                    };
+                    let mut args = vec![("content", content.as_str()), ("label", label)];
+                    args.extend_from_slice(item);
+                    barrier.wait();
+                    let iri = format!("urn:iki:judge:correct:{Q}");
+                    if h.issue_as(cap, Verb::Sink, &iri, &args).is_err() {
+                        errors.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        if !verdict_and_bayes_agree(&h, &content).1 {
+            divergent += 1;
+        }
+    }
+    let errors = errors.into_inner();
+    assert_eq!(
+        (divergent, errors),
+        (0, 0),
+        "{divergent} of {ROUNDS} rounds diverged; {errors} corrections failed part-way"
+    );
+}
