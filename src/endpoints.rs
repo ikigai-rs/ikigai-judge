@@ -1251,8 +1251,9 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
         &format!("Judge an item for `{n}` with the pinned model"),
         "Idempotent: if the item's class is not `pending` (and not stale), answers it and writes \
          nothing; a model verdict already recorded for the current classifier (even unparsed) \
-         is never asked again. Otherwise checks the source's daily budget (RetryAfter past it; \
-         the item stays pending), asks `urn:llm:<provider>:ask` (the pinned model, temperature \
+         is never asked again. A reserved call without a recorded verdict is refused (Conflict) \
+         to avoid paying again after a failed call or write. Otherwise checks the source's \
+         daily budget (RetryAfter past it; the item stays pending), asks `urn:llm:<provider>:ask` (the pinned model, temperature \
          0, JSON), refuses an answer naming another model (Conflict), and records the model \
          verdict atom: the label, or an unparsed verdict with the raw text.",
         Verb::Sink,
@@ -1271,7 +1272,9 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
             // Lock the model atom's identity, independent of source or item IRI. Keep it
             // through both writes so a waiter re-reads the completed verdict before it
             // reserves any budget. Always take the item lock before the budget lock.
-            let item_lock = item_locks.for_key(&q.classifier().digest(), &item.digest);
+            let c = q.classifier();
+            let classifier = c.digest();
+            let item_lock = item_locks.for_key(&classifier, &item.digest);
             let _item_reservation = item_lock.lock().await;
             let g = gather(inv, &q, &item).await?;
             let reply = |change: &str, label: Option<&str>, by: &str| {
@@ -1292,6 +1295,14 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
                 .any(|v| v.producer == Producer::Model { generation: 0 })
             {
                 return Ok(reply("unchanged", None, "unparsed"));
+            }
+            let reservation_path = atoms::reservation_path(&q.name, &classifier, &item.digest);
+            if read_atom(inv, &reservation_path).await?.is_some() {
+                return Err(Error::Conflict(format!(
+                    "a model call for item {} was already reserved, but no verdict is recorded; \
+                     refused another call (reservation <{reservation_path}>)",
+                    item.digest
+                )));
             }
             let (date, created) = now(inv)?;
             // Reserve under an async lock: no caller of this endpoint can observe the
@@ -1319,6 +1330,15 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
                 &atoms::spent_turtle(&spent_name(&q.name, &source, &date), used + 1),
             )
             .await?;
+            // Persist the item reservation before the paid side effect. Retain it on
+            // failure: without a verdict we cannot know whether retrying would pay twice.
+            let name = model_name(&q.name, &classifier, &item.digest);
+            write_atom(
+                inv,
+                &reservation_path,
+                &atoms::reservation_turtle(&reservation_path, &name, &created),
+            )
+            .await?;
             drop(reservation);
             let endpoint = format!("urn:llm:{}:ask", q.provider);
             let prompt = format!("{}\n\n{}", q.prompt, item.content);
@@ -1342,7 +1362,7 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
             if answered_by != q.model {
                 return Err(Error::Conflict(format!(
                     "<{endpoint}> answered as model `{answered_by}`, not the pinned `{}`: refused, \
-                     nothing recorded",
+                     no verdict recorded",
                     q.model
                 )));
             }
@@ -1353,8 +1373,6 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
             } else {
                 text.to_string()
             };
-            let c = q.classifier();
-            let name = model_name(&q.name, &c.digest(), &item.digest);
             let target = item.target();
             let prompt_iri = iri("prompt", &q.name);
             let atom = atoms::model_turtle(&ModelRecord {
@@ -1369,7 +1387,7 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
                 prompt: &prompt_iri,
                 prompt_digest: &c.prompt_digest,
             });
-            write_atom(inv, &atoms::model_path(&q.name, &c.digest(), &item.digest), &atom).await?;
+            write_atom(inv, &atoms::model_path(&q.name, &classifier, &item.digest), &atom).await?;
             if let Some(it) = &item.item {
                 let path = atoms::model_last_path(&q.name, it);
                 write_atom(inv, &path, &atoms::last_turtle(&path, it, &item.digest)).await?;

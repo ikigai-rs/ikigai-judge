@@ -6,6 +6,7 @@
 //! model/{q}/{classifier}/{digest}.ttl      a model verdict, written once (the judge)
 //! model/{q}/last/{item}.ttl                the item's last digest the judge judged
 //! model/{q}/spent/{source}/{date}.ttl      model calls spent that day
+//! model/{q}/reserved/{classifier}/{digest}.ttl  a model call reserved before asking
 //! person/{principal}/{q}/{digest}.ttl      a person's latest correction (their corridor)
 //! person/{principal}/{q}/last/{item}.ttl   the item's last digest that person corrected
 //! ```
@@ -35,6 +36,10 @@ const PROV: &str = "http://www.w3.org/ns/prov#";
 
 pub fn model_path(q: &str, classifier: &str, digest: &str) -> String {
     format!("urn:file:model/{q}/{classifier}/{digest}.ttl")
+}
+
+pub fn reservation_path(q: &str, classifier: &str, digest: &str) -> String {
+    format!("urn:file:model/{q}/reserved/{classifier}/{digest}.ttl")
 }
 
 pub fn model_last_path(q: &str, item: &str) -> String {
@@ -144,6 +149,15 @@ pub fn person_turtle(
 pub fn last_turtle(name: &str, item: &str, digest: &str) -> String {
     format!(
         "{PREFIXES}<{name}> dcterms:subject <{item}> ;\n  dcterms:identifier \"b3:{digest}\" .\n"
+    )
+}
+
+/// A durable attempt marker, kept even if the model call or its verdict write fails.
+/// It is not a verdict: an uncertain outcome must never become an invented label.
+pub fn reservation_turtle(name: &str, verdict: &str, created: &str) -> String {
+    format!(
+        "{PREFIXES}<{name}> a prov:Activity ;\n  dcterms:subject <{verdict}> ;\n  \
+         dcterms:created \"{created}\"^^xsd:dateTime .\n"
     )
 }
 
