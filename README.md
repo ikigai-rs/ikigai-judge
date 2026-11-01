@@ -148,7 +148,11 @@ The only recursive parse of request input is `items` and the model's envelope, b
 `serde_json`, which refuses nesting past 128 levels.
 
 The judge endpoint serializes each source's daily budget check and increment, reserving a
-call before asking the model. It releases the lock before the model request. Refusals return
+call before asking the model. It releases the budget lock before the model request so
+unrelated items can proceed. A separate lock for each classifier and content digest covers
+the verdict read, budget reservation, model request, and verdict writes. A caller waiting
+for the same item re-reads its verdict before reserving any budget, including when callers
+name different sources. Refusals return
 `RetryAfter` with the delay until the next UTC day. Failed calls still spend their reservation.
 This coordination covers concurrent calls sharing one endpoint instance. Separate endpoint
 instances or processes sharing the same atoms still require external coordination, such as
