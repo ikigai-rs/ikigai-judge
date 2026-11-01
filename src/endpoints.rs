@@ -1221,8 +1221,9 @@ fn parse_label<'a>(q: &'a Question, text: &str) -> Option<&'a crate::Label> {
 type ReservationLock = futures::lock::Mutex<()>;
 type ReservationLockMap = HashMap<(String, String), Weak<ReservationLock>>;
 
-/// Endpoint-local reservation locks, keyed by (source, UTC date) for budgets or by
-/// (classifier digest, content digest) for items. Weak entries release inactive keys.
+/// Endpoint-local reservation locks, keyed by (source, UTC date) for budgets, by
+/// (classifier digest, content digest) for items, or by (corridor, content digest) for
+/// corrections. Weak entries release inactive keys.
 #[derive(Default)]
 struct ReservationLocks(Mutex<ReservationLockMap>);
 
@@ -1404,6 +1405,7 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
 // --- the resolution -----------------------------------------------------------------------
 
 fn correct_door(q: Arc<Question>) -> AsyncFnEndpoint {
+    let correction_locks = Arc::new(ReservationLocks::default());
     let n = q.name.clone();
     let mut inputs = vec![
         content_spec(),
@@ -1429,6 +1431,7 @@ fn correct_door(q: Arc<Question>) -> AsyncFnEndpoint {
     );
     AsyncFnEndpoint::new(format!("judge-{n}-correct"), move |inv| {
         let q = q.clone();
+        let correction_locks = correction_locks.clone();
         Box::pin(async move {
             let face = face(inv, &PLAIN_FACES)?;
             let item = item_of(inv, false)?;
@@ -1441,6 +1444,11 @@ fn correct_door(q: Arc<Question>) -> AsyncFnEndpoint {
             let corridor = if curator { q.product.clone() } else { who.clone() };
             let (_, created) = now(inv)?;
             let target = item.target();
+            // Hold the corridor's item lock from the atom write through the train, so a
+            // later correction's atom and train both land after this one's: the shared
+            // verdict and bayes end on the same label. Endpoint-local, like the judge's.
+            let correction_lock = correction_locks.for_key(&corridor, &item.digest);
+            let _correction = correction_lock.lock().await;
             let atom = atoms::person_turtle(
                 &person_name(&q.name, &item.digest),
                 &target,

@@ -165,6 +165,10 @@ reservation is retained and never automatically expires: an operator must reconc
 provider's outcome before removing it to allow a retry. Successful verdicts, including
 unparsed answers, continue to be returned normally.
 
+The correct endpoint holds a lock for each corridor and content digest from the person atom
+write through the bayes train. Concurrent corrections of one item land one after another, so
+the shared verdict and bayes end on the same label: the last correction's.
+
 This coordination covers concurrent calls sharing one endpoint instance. Separate endpoint
 instances or processes sharing the same atoms still require external coordination, such as
 one worker per question, or storage-level compare-and-set.
