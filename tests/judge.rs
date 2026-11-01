@@ -467,6 +467,119 @@ fn a_judge_arriving_while_the_model_answers_reuses_its_verdict() {
 }
 
 #[test]
+fn a_failed_verdict_write_never_pays_for_the_item_again() {
+    let h = Host::new();
+    // Permit reservations, but refuse the verdict write after the fake model answers.
+    let cap = Capability::scoped([
+        format!("urn:cap:judge:read:{Q}"),
+        format!("urn:cap:judge:judge:{Q}"),
+        h.fs("read", ""),
+        h.fs("write", &format!("/model/{Q}/spent")),
+        h.fs("write", &format!("/model/{Q}/reserved")),
+        format!("urn:cap:bayes:read:{Q}"),
+    ]);
+    let iri = format!("urn:iki:judge:judge:{Q}");
+    assert!(h
+        .issue_as(
+            &cap,
+            Verb::Sink,
+            &iri,
+            &[("content", HAMMY), ("source", "form")]
+        )
+        .is_err());
+    assert_eq!(h.fake.calls(), 1);
+    assert_eq!(h.class(HAMMY, &[]), "pending\n");
+    let err = h.judge(HAMMY, &[]).unwrap_err();
+    assert!(
+        matches!(err, Error::Conflict(ref detail) if detail.contains("already reserved")),
+        "{err}"
+    );
+
+    // A new endpoint instance over the same storage must also honor the saved attempt.
+    let root = std::sync::Arc::new(ikigai_core::Fallback::new(vec![
+        std::sync::Arc::new(ikigai_judge::space([question()])),
+        h.root_space.clone(),
+    ]));
+    let kernel = ikigai_core::Kernel::with_meta_renderer(
+        root,
+        std::sync::Arc::new(ikigai_vocab::TurtleRenderer),
+    )
+    .with_clock(std::sync::Arc::new(ikigai_core::FixedClock::at(NOW)));
+    let err = futures::executor::block_on(kernel.issue(
+        request(Verb::Sink, &iri, &[("content", HAMMY), ("source", "other")]),
+        &h.worker(),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, Error::Conflict(_)), "{err}");
+    assert_eq!(h.fake.calls(), 1);
+    assert_eq!(
+        h.text(
+            Verb::Source,
+            &format!("urn:iki:judge:spent:{Q}:form:2026-10-31"),
+            &[]
+        ),
+        "spent 1 of 100\n"
+    );
+    assert_eq!(
+        h.text(
+            Verb::Source,
+            &format!("urn:iki:judge:spent:{Q}:other:2026-10-31"),
+            &[]
+        ),
+        "spent 0 of 100\n"
+    );
+}
+
+#[test]
+fn a_canceled_model_call_is_not_paid_again() {
+    let h = Host::new();
+    let (_release, gate) = futures::channel::oneshot::channel();
+    *h.fake.gate.lock().unwrap() = Some(gate);
+    let cap = h.worker();
+    let iri = format!("urn:iki:judge:judge:{Q}");
+    futures::executor::block_on(async {
+        let attempt = h.kernel.issue(
+            request(Verb::Sink, &iri, &[("content", HAMMY), ("source", "form")]),
+            &cap,
+        );
+        futures::pin_mut!(attempt);
+        assert!(futures::poll!(&mut attempt).is_pending());
+        assert_eq!(h.fake.calls(), 1);
+        // Leaving this scope drops the request while its model response is outstanding.
+    });
+    assert!(matches!(h.judge(HAMMY, &[]), Err(Error::Conflict(_))));
+    assert_eq!(h.fake.calls(), 1);
+    assert_eq!(h.class(HAMMY, &[]), "pending\n");
+}
+
+#[test]
+fn a_failed_item_reservation_never_calls_the_model() {
+    let h = Host::new();
+    let classifier = question().classifier().digest();
+    let cap = Capability::scoped([
+        format!("urn:cap:judge:read:{Q}"),
+        format!("urn:cap:judge:judge:{Q}"),
+        h.fs("read", ""),
+        h.fs("write", &format!("/model/{Q}/spent")),
+        h.fs("write", &format!("/model/{Q}/{classifier}")),
+        format!("urn:cap:bayes:read:{Q}"),
+    ]);
+    assert!(h
+        .issue_as(
+            &cap,
+            Verb::Sink,
+            &format!("urn:iki:judge:judge:{Q}"),
+            &[("content", HAMMY), ("source", "form")]
+        )
+        .is_err());
+    assert_eq!(h.fake.calls(), 0);
+    assert_eq!(h.class(HAMMY, &[]), "pending\n");
+    // A reservation that was never saved must not strand the item.
+    h.judge(HAMMY, &[]).unwrap();
+    assert_eq!(h.fake.calls(), 1);
+}
+
+#[test]
 fn concurrent_judgments_reserve_only_the_available_model_calls() {
     const CALLERS: usize = 8;
     for (budget, initial) in [(0, 0), (1, 0), (3, 0), (3, 1)] {
@@ -587,6 +700,12 @@ fn an_envelope_naming_another_model_is_refused_and_nothing_is_recorded() {
     let err = h.judge(HAMMY, &[]).unwrap_err();
     assert!(matches!(err, Error::Conflict(_)), "{err}");
     assert_eq!(h.class(HAMMY, &[]), "pending\n");
+    assert!(matches!(h.judge(HAMMY, &[]), Err(Error::Conflict(_))));
+    assert_eq!(
+        h.fake.calls(),
+        1,
+        "a refused model answer is still a paid attempt"
+    );
     let classifier = h.text(Verb::Source, &format!("urn:iki:judge:classifier:{Q}"), &[]);
     let digest = ikigai_judge::digest_hex(HAMMY.as_bytes());
     assert!(matches!(
