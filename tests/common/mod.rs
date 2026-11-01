@@ -11,8 +11,8 @@ use futures::executor::block_on;
 use ikigai_bayes::{Bayes, ModelConfig};
 use ikigai_core::{
     principal_scope, ArgRef, ArgSpec, AsyncFnEndpoint, Capability, Description, EndpointSpace,
-    Exact, Fallback, FixedClock, FnEndpoint, Iri, Kernel, ReprType, Representation, Request,
-    Result, Space, Verb,
+    Exact, Fallback, FixedClock, Iri, Kernel, ReprType, Representation, Request, Result, Space,
+    Verb,
 };
 use ikigai_judge::Question;
 
@@ -30,6 +30,7 @@ pub struct Fake {
     pub text: Mutex<String>,
     pub model: Mutex<String>,
     pub calls: AtomicUsize,
+    pub gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
 }
 
 impl Fake {
@@ -41,25 +42,44 @@ impl Fake {
     }
 }
 
-pub fn fake_llm(fake: Arc<Fake>) -> FnEndpoint {
-    FnEndpoint::new("fake-llm-ask", move |inv| {
-        fake.calls.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(inv.inline_str("temperature")?, "0", "temperature 0");
-        assert_eq!(
-            inv.inline_str("model")?,
-            MODEL,
-            "the pinned model is asked for"
-        );
-        assert_eq!(inv.inline_str("as")?, "application/json");
-        let body = serde_json::json!({
-            "model": *fake.model.lock().unwrap(),
-            "text": *fake.text.lock().unwrap(),
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-        });
-        Ok(Representation::new(
-            ReprType::new("application/json"),
-            body.to_string(),
-        ))
+pub fn fake_llm(fake: Arc<Fake>) -> AsyncFnEndpoint {
+    AsyncFnEndpoint::new("fake-llm-ask", move |inv| {
+        let fake = fake.clone();
+        Box::pin(async move {
+            fake.calls.fetch_add(1, Ordering::SeqCst);
+            let gate = fake.gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.await.expect("the test releases the model answer");
+            }
+            // Let another judge arrive while this model call is in flight.
+            let mut yielded = false;
+            futures::future::poll_fn(|cx| {
+                if yielded {
+                    std::task::Poll::Ready(())
+                } else {
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            assert_eq!(inv.inline_str("temperature")?, "0", "temperature 0");
+            assert_eq!(
+                inv.inline_str("model")?,
+                MODEL,
+                "the pinned model is asked for"
+            );
+            assert_eq!(inv.inline_str("as")?, "application/json");
+            let body = serde_json::json!({
+                "model": *fake.model.lock().unwrap(),
+                "text": *fake.text.lock().unwrap(),
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            });
+            Ok(Representation::new(
+                ReprType::new("application/json"),
+                body.to_string(),
+            ))
+        })
     })
     .with_description(
         Description::new("fake-llm-ask")

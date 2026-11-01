@@ -379,6 +379,93 @@ fn a_stale_verdict_against_bayes_on_the_new_text_is_a_disagreement() {
 
 // --- the judge's refusals -----------------------------------------------------------------
 
+/// A yielding fake holds the first answer in flight while the other judges arrive.
+/// Different sources must still share the item's reservation, even with a budget of one.
+#[test]
+fn concurrent_judges_of_one_item_ask_the_model_once() {
+    for answer in [r#"{"label":"spam"}"#, "no label"] {
+        let h = Host::with(question().budget(1));
+        h.fake.answer(answer);
+        let cap = h.worker();
+        let iri = format!("urn:iki:judge:judge:{Q}");
+        let requests: Vec<_> = (0..8)
+            .map(|n| {
+                request(
+                    Verb::Sink,
+                    &iri,
+                    &[
+                        ("content", "one shared item"),
+                        ("source", if n % 2 == 0 { "form" } else { "other" }),
+                    ],
+                )
+            })
+            .collect();
+        let results = futures::executor::block_on(futures::future::join_all(
+            requests.into_iter().map(|r| h.kernel.issue(r, &cap)),
+        ));
+        assert_eq!(h.fake.calls(), 1, "one paid call for this item");
+        for result in results {
+            result.unwrap();
+        }
+        let spent: u32 = ["form", "other"]
+            .into_iter()
+            .map(|source| {
+                h.text(
+                    Verb::Source,
+                    &format!("urn:iki:judge:spent:{Q}:{source}:2026-10-31"),
+                    &[],
+                )
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+            })
+            .sum();
+        assert_eq!(spent, 1);
+        h.judge("one shared item", &[]).unwrap();
+        assert_eq!(h.fake.calls(), 1, "the recorded verdict is reused");
+    }
+}
+
+#[test]
+fn a_judge_arriving_while_the_model_answers_reuses_its_verdict() {
+    let h = Host::new();
+    let (release, gate) = futures::channel::oneshot::channel();
+    *h.fake.gate.lock().unwrap() = Some(gate);
+    let cap = h.worker();
+    let iri = format!("urn:iki:judge:judge:{Q}");
+    let first = request(
+        Verb::Sink,
+        &iri,
+        &[("content", "in-flight item"), ("source", "form")],
+    );
+    let later = request(
+        Verb::Sink,
+        &iri,
+        &[("content", "in-flight item"), ("source", "other")],
+    );
+    futures::executor::block_on(async {
+        let first = h.kernel.issue(first, &cap);
+        let later = h.kernel.issue(later, &cap);
+        futures::pin_mut!(first, later);
+        assert!(futures::poll!(&mut first).is_pending());
+        assert_eq!(h.fake.calls(), 1, "the first model call has started");
+        assert!(futures::poll!(&mut later).is_pending());
+        release.send(()).unwrap();
+        let (first, later) = futures::join!(first, later);
+        assert_eq!(
+            String::from_utf8(first.unwrap().bytes).unwrap(),
+            "judged spam model\n"
+        );
+        assert_eq!(
+            String::from_utf8(later.unwrap().bytes).unwrap(),
+            "unchanged spam model\n"
+        );
+    });
+    assert_eq!(h.fake.calls(), 1);
+}
+
 #[test]
 fn concurrent_judgments_reserve_only_the_available_model_calls() {
     const CALLERS: usize = 8;
