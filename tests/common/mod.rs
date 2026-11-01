@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex};
 use futures::executor::block_on;
 use ikigai_bayes::{Bayes, ModelConfig};
 use ikigai_core::{
-    principal_scope, ArgRef, ArgSpec, Capability, Description, EndpointSpace, Exact, Fallback,
-    FixedClock, FnEndpoint, Iri, Kernel, ReprType, Representation, Request, Result, Space, Verb,
+    principal_scope, ArgRef, ArgSpec, AsyncFnEndpoint, Capability, Description, EndpointSpace,
+    Exact, Fallback, FixedClock, FnEndpoint, Iri, Kernel, ReprType, Representation, Request,
+    Result, Space, Verb,
 };
 use ikigai_judge::Question;
 
@@ -83,6 +84,46 @@ pub fn question() -> Question {
     .curator("urn:example:curator")
 }
 
+/// Preserve the real filesystem's bindings, capabilities and atom storage, but pause each
+/// spent read after taking its snapshot so concurrent callers expose read/write races.
+struct YieldingSpent(Arc<dyn Space>);
+
+impl Space for YieldingSpent {
+    fn resolve(&self, request: &Request, scope: &ikigai_core::Scope) -> ikigai_core::Resolution {
+        let resolved = self.0.resolve(request, scope);
+        if request.verb != Verb::Source
+            || request.target.as_str() != format!("urn:file:model/{Q}/spent/form/2026-10-31.ttl")
+        {
+            return resolved;
+        }
+        resolved.map_endpoint(|endpoint| {
+            let description = endpoint.describe();
+            Arc::new(
+                AsyncFnEndpoint::new("yielding-spent", move |inv| {
+                    let endpoint = endpoint.clone();
+                    Box::pin(async move {
+                        let result = endpoint.invoke(inv).await;
+                        // No timers or blocking barrier: a serialized implementation can pass.
+                        let mut yielded = false;
+                        futures::future::poll_fn(|cx| {
+                            if yielded {
+                                std::task::Poll::Ready(())
+                            } else {
+                                yielded = true;
+                                cx.waker().wake_by_ref();
+                                std::task::Poll::Pending
+                            }
+                        })
+                        .await;
+                        result
+                    })
+                })
+                .with_description(description),
+            )
+        })
+    }
+}
+
 pub struct Host {
     pub kernel: Kernel,
     pub fake: Arc<Fake>,
@@ -97,15 +138,29 @@ impl Host {
     }
 
     pub fn with(q: Question) -> Host {
+        Self::build(q, false)
+    }
+
+    pub fn with_yielding_spent(q: Question) -> Host {
+        Self::build(q, true)
+    }
+
+    fn build(q: Question, yield_spent: bool) -> Host {
         let root = Scratch::new();
         let fake = Arc::new(Fake::default());
         *fake.model.lock().unwrap() = MODEL.into();
         fake.answer("{\"label\": \"spam\"}");
         let bayes = Bayes::in_memory([ModelConfig::new(Q)]).unwrap();
         let judge = Arc::new(ikigai_judge::space([q]));
+        let fs = Arc::new(ikigai_fs::cacheable_space(root.path()));
+        let fs: Arc<dyn Space> = if yield_spent {
+            Arc::new(YieldingSpent(fs))
+        } else {
+            fs
+        };
         let spaces: Vec<Arc<dyn Space>> = vec![
             judge.clone(),
-            Arc::new(ikigai_fs::cacheable_space(root.path())),
+            fs,
             Arc::new(ikigai_bayes::space(&bayes)),
             Arc::new(
                 EndpointSpace::new().bind(Exact::new("urn:llm:fake:ask"), fake_llm(fake.clone())),

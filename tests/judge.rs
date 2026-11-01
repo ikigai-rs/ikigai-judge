@@ -380,11 +380,65 @@ fn a_stale_verdict_against_bayes_on_the_new_text_is_a_disagreement() {
 // --- the judge's refusals -----------------------------------------------------------------
 
 #[test]
-fn past_the_budget_the_judge_refuses_over_budget_and_the_item_stays_pending() {
+fn concurrent_judgments_reserve_only_the_available_model_calls() {
+    const CALLERS: usize = 8;
+    for (budget, initial) in [(0, 0), (1, 0), (3, 0), (3, 1)] {
+        let h = Host::with_yielding_spent(question().budget(budget));
+        for n in 0..initial {
+            h.judge(&format!("earlier item {n}"), &[]).unwrap();
+        }
+        let cap = h.worker();
+        let iri = format!("urn:iki:judge:judge:{Q}");
+        let requests: Vec<_> = (0..CALLERS)
+            .map(|n| {
+                request(
+                    Verb::Sink,
+                    &iri,
+                    &[
+                        ("content", &format!("concurrent item {n}")),
+                        ("source", "form"),
+                    ],
+                )
+            })
+            .collect();
+        let results = futures::executor::block_on(futures::future::join_all(
+            requests.into_iter().map(|r| h.kernel.issue(r, &cap)),
+        ));
+        let calls = h.fake.calls();
+        let spent = h.text(
+            Verb::Source,
+            &format!("urn:iki:judge:spent:{Q}:form:2026-10-31"),
+            &[],
+        );
+        assert!(
+            calls <= budget as usize,
+            "{calls} calls exceeded budget {budget}; {spent}"
+        );
+        assert_eq!(calls, budget as usize);
+        assert_eq!(spent, format!("spent {calls} of {budget}\n"));
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            calls - initial
+        );
+        for (n, result) in results.into_iter().enumerate() {
+            if let Err(err) = result {
+                assert!(matches!(err, Error::RetryAfter { .. }), "{err}");
+                assert_eq!(h.class(&format!("concurrent item {n}"), &[]), "pending\n");
+            }
+        }
+    }
+}
+
+#[test]
+fn past_the_budget_the_judge_refuses_until_tomorrow_and_the_item_stays_pending() {
     let h = Host::with(question().budget(1));
     h.judge("first item", &[]).unwrap();
     let err = h.judge("second item", &[]).unwrap_err();
-    assert!(matches!(err, Error::OverBudget { .. }), "{err}");
+    assert!(
+        matches!(err, Error::RetryAfter { delay: Some(delay), .. }
+        if delay == std::time::Duration::from_millis(47_382_877)),
+        "{err}"
+    );
     assert_eq!(h.fake.calls(), 1, "no call past the budget");
     assert_eq!(h.class("second item", &[]), "pending\n");
     let spent = h.text(

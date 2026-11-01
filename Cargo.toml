@@ -12,6 +12,8 @@ keywords = ["ikigai", "roc", "classification", "judgment", "module"]
 categories = ["wasm", "text-processing"]
 
 [dependencies]
+# Async budget reservation locks work on native and browser executors.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 # The released kernel, consumed from crates.io: the same version the hosts use, so a host
 # links exactly one `ikigai-core`. 0.2.10 is the newest published. ⚠ `"0.2.10"` is also a
 # ceiling below 0.3.0.
