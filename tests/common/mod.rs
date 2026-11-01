@@ -104,22 +104,48 @@ pub fn question() -> Question {
     .curator("urn:example:curator")
 }
 
-/// Preserve the real filesystem's bindings, capabilities and atom storage, but pause each
-/// spent read after taking its snapshot so concurrent callers expose read/write races.
-struct YieldingSpent(Arc<dyn Space>);
+/// Which filesystem calls the test host pauses after they complete.
+#[derive(Clone, Copy, PartialEq)]
+enum Pause {
+    Nothing,
+    /// Each spent read, after taking its snapshot.
+    SpentReads,
+    /// Each person last-digest write, after it lands.
+    PersonLastWrites,
+}
 
-impl Space for YieldingSpent {
+impl Pause {
+    fn matches(self, request: &Request) -> bool {
+        let target = request.target.as_str();
+        match self {
+            Pause::Nothing => false,
+            Pause::SpentReads => {
+                request.verb == Verb::Source
+                    && target == format!("urn:file:model/{Q}/spent/form/2026-10-31.ttl")
+            }
+            Pause::PersonLastWrites => {
+                request.verb == Verb::Sink
+                    && target.starts_with("urn:file:person/")
+                    && target.contains(&format!("/{Q}/last/"))
+            }
+        }
+    }
+}
+
+/// Preserve the real filesystem's bindings, capabilities and atom storage, but pause the
+/// chosen calls after they complete so concurrent callers expose read/write races.
+struct Yielding(Arc<dyn Space>, Pause);
+
+impl Space for Yielding {
     fn resolve(&self, request: &Request, scope: &ikigai_core::Scope) -> ikigai_core::Resolution {
         let resolved = self.0.resolve(request, scope);
-        if request.verb != Verb::Source
-            || request.target.as_str() != format!("urn:file:model/{Q}/spent/form/2026-10-31.ttl")
-        {
+        if !self.1.matches(request) {
             return resolved;
         }
         resolved.map_endpoint(|endpoint| {
             let description = endpoint.describe();
             Arc::new(
-                AsyncFnEndpoint::new("yielding-spent", move |inv| {
+                AsyncFnEndpoint::new("yielding-fs", move |inv| {
                     let endpoint = endpoint.clone();
                     Box::pin(async move {
                         let result = endpoint.invoke(inv).await;
@@ -158,14 +184,18 @@ impl Host {
     }
 
     pub fn with(q: Question) -> Host {
-        Self::build(q, false)
+        Self::build(q, Pause::Nothing)
     }
 
     pub fn with_yielding_spent(q: Question) -> Host {
-        Self::build(q, true)
+        Self::build(q, Pause::SpentReads)
     }
 
-    fn build(q: Question, yield_spent: bool) -> Host {
+    pub fn with_yielding_person_last(q: Question) -> Host {
+        Self::build(q, Pause::PersonLastWrites)
+    }
+
+    fn build(q: Question, pause: Pause) -> Host {
         let root = Scratch::new();
         let fake = Arc::new(Fake::default());
         *fake.model.lock().unwrap() = MODEL.into();
@@ -173,8 +203,8 @@ impl Host {
         let bayes = Bayes::in_memory([ModelConfig::new(Q)]).unwrap();
         let judge = Arc::new(ikigai_judge::space([q]));
         let fs = Arc::new(ikigai_fs::cacheable_space(root.path()));
-        let fs: Arc<dyn Space> = if yield_spent {
-            Arc::new(YieldingSpent(fs))
+        let fs: Arc<dyn Space> = if pause != Pause::Nothing {
+            Arc::new(Yielding(fs, pause))
         } else {
             fs
         };
