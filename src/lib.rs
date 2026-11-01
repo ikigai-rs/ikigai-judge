@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use ikigai_core::ContentId;
 
@@ -28,8 +29,13 @@ pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 /// The bound on the items a `pending` or `disagreements` composition takes in one call.
 pub const MAX_ITEMS: usize = 1000;
 
-/// The bound on a model's raw answer recorded in an unparsed verdict.
+/// The bound on a model's raw answer recorded in an unparsed verdict, and on a failed call's
+/// error message recorded beside its reservation.
 pub const MAX_RAW_BYTES: usize = 4096;
+
+/// How long after a failed model call the judge may ask again, unless the question sets
+/// another delay ([`Question::retry_after`]).
+pub const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(3600);
 
 /// The bare-hex BLAKE3 digest of `bytes`: how a `{digest}` appears inside a resource name
 /// (never a `b3:` colon inside a template).
@@ -107,6 +113,7 @@ pub struct Question {
     pub(crate) model: String,
     pub(crate) bayes: Option<String>,
     pub(crate) budget: u32,
+    pub(crate) retry_delay: Duration,
     pub(crate) previous: Vec<Classifier>,
     pub(crate) mapping: Option<Mapping>,
     pub(crate) product: String,
@@ -185,6 +192,7 @@ impl Question {
             model: model.into(),
             bayes: None,
             budget: 0,
+            retry_delay: DEFAULT_RETRY_DELAY,
             previous: Vec::new(),
             mapping: None,
             curators: Vec::new(),
@@ -202,6 +210,14 @@ impl Question {
     /// Model calls allowed per source per day.
     pub fn budget(mut self, calls_per_day: u32) -> Self {
         self.budget = calls_per_day;
+        self
+    }
+
+    /// How long after a failed model call for an item the judge may ask again (default
+    /// [`DEFAULT_RETRY_DELAY`], an hour). Until then a judge of that item is refused with
+    /// `RetryAfter`; a curator can clear the reservation to allow a retry at once.
+    pub fn retry_after(mut self, delay: Duration) -> Self {
+        self.retry_delay = delay;
         self
     }
 

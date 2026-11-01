@@ -1,6 +1,7 @@
 //! The judge as a host sees it: the ranking (each producer alone and in combination), the
 //! disagreement signal and its resolution, stale verdicts after an edit, per-principal
-//! corridors, the budget, unparsed and wrong-model answers. A fake `urn:llm` endpoint, never a
+//! corridors, the budget, unparsed and wrong-model answers (a failed call's retry is
+//! `tests/retry.rs`). A fake `urn:llm` endpoint, never a
 //! real model.
 
 mod common;
@@ -489,9 +490,10 @@ fn a_failed_verdict_write_never_pays_for_the_item_again() {
         .is_err());
     assert_eq!(h.fake.calls(), 1);
     assert_eq!(h.class(HAMMY, &[]), "pending\n");
+    // The failure is recorded beside the reservation: refused until its retry time.
     let err = h.judge(HAMMY, &[]).unwrap_err();
     assert!(
-        matches!(err, Error::Conflict(ref detail) if detail.contains("already reserved")),
+        matches!(err, Error::RetryAfter { ref detail, .. } if detail.contains("retry at ")),
         "{err}"
     );
 
@@ -510,7 +512,7 @@ fn a_failed_verdict_write_never_pays_for_the_item_again() {
         &h.worker(),
     ))
     .unwrap_err();
-    assert!(matches!(err, Error::Conflict(_)), "{err}");
+    assert!(matches!(err, Error::RetryAfter { .. }), "{err}");
     assert_eq!(h.fake.calls(), 1);
     assert_eq!(
         h.text(
@@ -700,7 +702,7 @@ fn an_envelope_naming_another_model_is_refused_and_nothing_is_recorded() {
     let err = h.judge(HAMMY, &[]).unwrap_err();
     assert!(matches!(err, Error::Conflict(_)), "{err}");
     assert_eq!(h.class(HAMMY, &[]), "pending\n");
-    assert!(matches!(h.judge(HAMMY, &[]), Err(Error::Conflict(_))));
+    assert!(matches!(h.judge(HAMMY, &[]), Err(Error::RetryAfter { .. })));
     assert_eq!(
         h.fake.calls(),
         1,

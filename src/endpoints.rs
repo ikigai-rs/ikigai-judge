@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use ikigai_core::{
-    ArgRef, ArgSpec, AsyncFnEndpoint, Description, EndpointSpace, Error, Exact, FailureClass,
-    Invocation, Iri, ReprType, Representation, Request, Result, UriTemplate, Verb,
+    ActionSpec, ArgRef, ArgSpec, AsyncFnEndpoint, Description, EndpointSpace, Error, Exact,
+    FailureClass, Invocation, Iri, ReprType, Representation, Request, Result, UriTemplate, Verb,
 };
 use serde_json::{json, Value};
 
@@ -48,6 +48,11 @@ pub fn correct_cap(q: &str) -> String {
     format!("urn:cap:judge:correct:{q}")
 }
 
+/// The capability of a Delete on a reservation (a curator's clear).
+pub fn clear_cap(q: &str) -> String {
+    format!("urn:cap:judge:clear:{q}")
+}
+
 fn iri(kind: &str, q: &str) -> String {
     format!("urn:iki:judge:{kind}:{q}")
 }
@@ -61,6 +66,8 @@ where
     for q in questions {
         let q = Arc::new(q);
         let n = q.name.clone();
+        // The judge and a curator's clear take the same item lock.
+        let item_locks = Arc::new(ReservationLocks::default());
         let t = |s: String| UriTemplate::parse(s).expect("a judge template is valid");
         space = space
             .bind(Exact::new(iri("question", &n)), question_door(q.clone()))
@@ -97,7 +104,17 @@ where
                 t(format!("{}:{{source}}:{{date}}", iri("spent", &n))),
                 spent_door(q.clone()),
             )
-            .bind(Exact::new(iri("judge", &n)), judge_door(q.clone()))
+            .bind(
+                t(format!(
+                    "{}:{{classifier}}:{{digest}}",
+                    iri("reservation", &n)
+                )),
+                reservation_door(q.clone(), item_locks.clone()),
+            )
+            .bind(
+                Exact::new(iri("judge", &n)),
+                judge_door(q.clone(), item_locks),
+            )
             .bind(Exact::new(iri("correct", &n)), correct_door(q));
     }
     space
@@ -609,6 +626,122 @@ fn provenance_text(v: &Verdict) -> String {
         .join(" ")
 }
 
+// --- a reserved model call -----------------------------------------------------------------
+
+fn reservation_name(q: &str, classifier: &str, digest: &str) -> String {
+    format!("{}:{classifier}:{digest}", iri("reservation", q))
+}
+
+/// A model call reserved for an item: its reservation, and how it failed when a failure is
+/// recorded for this attempt (one for an earlier attempt is spent).
+struct Call {
+    name: String,
+    reservation: atoms::Reservation,
+    failure: Option<atoms::Failure>,
+}
+
+impl Call {
+    /// `failed`, `cleared` (the judge may ask again) or `reserved` (no outcome recorded: in
+    /// flight, or lost).
+    fn state(&self) -> &'static str {
+        match (&self.reservation.cleared, &self.failure) {
+            (Some(_), _) => "cleared",
+            (None, Some(_)) => "failed",
+            (None, None) => "reserved",
+        }
+    }
+
+    /// What happened to the call and what can happen next, in words.
+    fn sentence(&self) -> String {
+        match (&self.reservation.cleared, &self.failure) {
+            (Some((by, at)), _) => {
+                format!("model call cleared by {by} at {at}; the judge may ask again")
+            }
+            (None, Some(f)) => format!(
+                "model call failed at {}: {}: {}; charged: {}; retry at {}",
+                f.created, f.kind, f.message, f.charged, f.retry_at
+            ),
+            (None, None) => format!(
+                "model call reserved at {}, no verdict or failure recorded; a curator can \
+                 clear it",
+                self.reservation.created
+            ),
+        }
+    }
+
+    /// The short form `pending` lists, when the item needs more than judging.
+    fn note(&self) -> Option<String> {
+        match (&self.reservation.cleared, &self.failure) {
+            (Some(_), _) => None,
+            (None, Some(f)) => Some(format!("model call failed, retry at {}", f.retry_at)),
+            (None, None) => Some(
+                "model call reserved, no verdict or failure recorded; a curator can clear it"
+                    .into(),
+            ),
+        }
+    }
+
+    fn json(&self) -> Value {
+        let f = self.failure.as_ref();
+        json!({
+            "attempt": self.reservation.attempt,
+            "charged": f.map(|f| f.charged.clone()),
+            "clearedAt": self.reservation.cleared.as_ref().map(|c| c.1.clone()),
+            "clearedBy": self.reservation.cleared.as_ref().map(|c| c.0.clone()),
+            "error": f.map(|f| f.kind.clone()),
+            "failedAt": f.map(|f| f.created.clone()),
+            "message": f.map(|f| f.message.clone()),
+            "reservation": self.name,
+            "reserved": self.reservation.created,
+            "retryAt": f.map(|f| f.retry_at.clone()),
+            "state": self.state(),
+            "summary": self.sentence(),
+        })
+    }
+}
+
+/// A classifier's reserved call for an item, if one is.
+async fn model_call(
+    inv: &Invocation<'_>,
+    q: &Question,
+    classifier: &str,
+    digest: &str,
+) -> Result<Option<Call>> {
+    let path = atoms::reservation_path(&q.name, classifier, digest);
+    let Some(text) = read_atom(inv, &path).await? else {
+        return Ok(None);
+    };
+    let reservation = atoms::parse_reservation(&text, &path)?;
+    let failure_path = atoms::failure_path(&q.name, classifier, digest);
+    let failure = match read_atom(inv, &failure_path).await? {
+        Some(text) => Some(atoms::parse_failure(&text, &failure_path)?)
+            .filter(|f| f.attempt == reservation.attempt),
+        None => None,
+    };
+    Ok(Some(Call {
+        name: reservation_name(&q.name, classifier, digest),
+        reservation,
+        failure,
+    }))
+}
+
+/// The reserved call `why` and `pending` report: none once the current classifier's verdict
+/// is recorded, which ends the call's story.
+async fn open_call(
+    inv: &Invocation<'_>,
+    q: &Question,
+    g: &Gathered,
+    digest: &str,
+) -> Result<Option<Call>> {
+    if g.verdicts
+        .iter()
+        .any(|v| v.producer == Producer::Model { generation: 0 })
+    {
+        return Ok(None);
+    }
+    model_call(inv, q, &q.classifier().digest(), digest).await
+}
+
 // --- config doors -------------------------------------------------------------------------
 
 fn question_door(q: Arc<Question>) -> AsyncFnEndpoint {
@@ -919,8 +1052,11 @@ fn why_door(q: Arc<Question>) -> AsyncFnEndpoint {
         &format!("judge-{n}-why"),
         &format!("Why an item has its class for `{n}`"),
         "Every verdict that exists for the item, ranked, each with its provenance, which one \
-         decided (or `pending`), whether it is stale, and bayes's strongest clues. Faces: \
-         text, Turtle (skolemized), HTML, JSON. Cacheable like the class.",
+         decided (or `pending`), whether it is stale, bayes's strongest clues, and, while no \
+         verdict of the current classifier is recorded, its reserved model call: failed (when, \
+         the error, whether charged, when the judge may retry), cleared by a curator, or \
+         reserved with no outcome recorded. Faces: text, Turtle (skolemized), HTML, JSON. \
+         Cacheable like the class.",
         Verb::Source,
         Some(read_cap(&n)),
         inputs,
@@ -932,19 +1068,22 @@ fn why_door(q: Arc<Question>) -> AsyncFnEndpoint {
             let face = face(inv, &WHY_FACES)?;
             let item = item_of(inv, false)?;
             let g = gather(inv, &q, &item).await?;
+            let call = open_call(inv, &q, &g, &item.digest).await?;
+            let call = call.as_ref();
             let (class, by) = class_of(&g);
             let body = match face {
                 JSON => json!({
                     "class": class,
                     "clues": g.clues.iter().map(|(t, p)| json!({"probability": p, "token": t})).collect::<Vec<_>>(),
                     "digest": item.digest,
+                    "modelCall": call.map(Call::json),
                     "producer": by.map(|v| v.producer.name()),
                     "verdicts": g.verdicts.iter().map(verdict_json).collect::<Vec<_>>(),
                 })
                 .to_string(),
-                TURTLE => why_turtle(&q, &item, &g, class),
-                HTML => why_html(&item, &g, class),
-                _ => why_text(&item, &g, class),
+                TURTLE => why_turtle(&q, &item, &g, class, call),
+                HTML => why_html(&item, &g, class, call),
+                _ => why_text(&item, &g, class, call),
             };
             Ok(answer(face, body).cacheable())
         })
@@ -952,7 +1091,7 @@ fn why_door(q: Arc<Question>) -> AsyncFnEndpoint {
     .with_description(d)
 }
 
-fn why_text(item: &Item, g: &Gathered, class: &str) -> String {
+fn why_text(item: &Item, g: &Gathered, class: &str, call: Option<&Call>) -> String {
     let deciding = decide(&g.verdicts);
     let mut out = format!("class {class}\ndigest {}\n", item.digest);
     if let Some(from) = deciding
@@ -961,6 +1100,13 @@ fn why_text(item: &Item, g: &Gathered, class: &str) -> String {
     {
         out.push_str(&format!(
             "stale: the text changed; this is the verdict on {from}, queued for re-judging\n"
+        ));
+    }
+    if let Some(call) = call {
+        out.push_str(&format!(
+            "{}; reservation {}\n",
+            call.sentence().replace('\n', "\\n"),
+            call.name
         ));
     }
     for (rank, v) in g.verdicts.iter().enumerate() {
@@ -986,7 +1132,7 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn why_html(item: &Item, g: &Gathered, class: &str) -> String {
+fn why_html(item: &Item, g: &Gathered, class: &str, call: Option<&Call>) -> String {
     let deciding = decide(&g.verdicts);
     let mut out = format!(
         "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>class {c}</title></head><body>\n\
@@ -1000,6 +1146,13 @@ fn why_html(item: &Item, g: &Gathered, class: &str) -> String {
     {
         out.push_str(&format!(
             "<p>stale: the verdict on <code>{from}</code>, queued for re-judging</p>\n"
+        ));
+    }
+    if let Some(call) = call {
+        out.push_str(&format!(
+            "<p>{}; reservation <code>{}</code></p>\n",
+            html_escape(&call.sentence()),
+            call.name
         ));
     }
     out.push_str("<ol>\n");
@@ -1029,7 +1182,7 @@ fn why_html(item: &Item, g: &Gathered, class: &str) -> String {
 }
 
 /// Skolemized: the why is `urn:iki:judge:why:{q}:{digest}`, each verdict that plus `:{rank}`.
-fn why_turtle(q: &Question, item: &Item, g: &Gathered, class: &str) -> String {
+fn why_turtle(q: &Question, item: &Item, g: &Gathered, class: &str, call: Option<&Call>) -> String {
     let me = format!("{}:{}", iri("why", &q.name), item.digest);
     let deciding = decide(&g.verdicts);
     let mut out = format!(
@@ -1064,6 +1217,16 @@ fn why_turtle(q: &Question, item: &Item, g: &Gathered, class: &str) -> String {
         }
         out.push_str(" .\n");
     }
+    if let Some(call) = call {
+        out.push_str(&format!(
+            "\n<{me}:call> a prov:Activity ;\n  schema:about <{me}> ;\n  \
+             prov:wasInformedBy <{}> ;\n  schema:actionStatus \"{}\" ;\n  \
+             schema:description \"{}\" .\n",
+            call.name,
+            call.state(),
+            escape(&call.sentence()),
+        ));
+    }
     out
 }
 
@@ -1074,8 +1237,10 @@ fn pending_door(q: Arc<Question>) -> AsyncFnEndpoint {
         &format!("A source's items that need judging for `{n}`"),
         "Of the items given (a JSON array, piped), those whose class is `pending`, and those \
          answered by a STALE verdict (queued for re-judging): one `<digest> <pending|stale|\
-         unparsed> <item>` line each. An item with an unparsed model verdict needs a person: \
-         the judge never retries it. Cacheable like the class.",
+         unparsed|failed|reserved> <item>` line each. An item with an unparsed model verdict \
+         needs a person: the judge never retries it. A `failed` line ends `model call failed, \
+         retry at <time>`; a `reserved` line (a call with no outcome recorded) says a curator \
+         can clear it. Cacheable like the class.",
         Verb::Source,
         Some(read_cap(&n)),
         vec![
@@ -1097,7 +1262,7 @@ fn pending_door(q: Arc<Question>) -> AsyncFnEndpoint {
             for mut item in items_of(inv)? {
                 item.source = Some(source.clone());
                 let g = gather(inv, &q, &item).await?;
-                let state = match decide(&g.verdicts) {
+                let mut state = match decide(&g.verdicts) {
                     Some(v) if v.producer == Producer::Stale => "stale",
                     Some(_) => continue,
                     None if g.verdicts.iter().any(|v| {
@@ -1108,18 +1273,28 @@ fn pending_door(q: Arc<Question>) -> AsyncFnEndpoint {
                     }
                     None => "pending",
                 };
-                rows.push((item.digest.clone(), state, item.target()));
+                let mut note = None;
+                if let Some(call) = open_call(inv, &q, &g, &item.digest).await? {
+                    if let Some(said) = call.note() {
+                        state = call.state();
+                        note = Some(said);
+                    }
+                }
+                rows.push((item.digest.clone(), state, item.target(), note));
             }
             let body = if face == JSON {
                 json!({
-                    "pending": rows.iter().map(|(d, s, i)| json!({"digest": d, "item": i, "state": s})).collect::<Vec<_>>(),
+                    "pending": rows.iter().map(|(d, s, i, n)| json!({"detail": n, "digest": d, "item": i, "state": s})).collect::<Vec<_>>(),
                     "question": q.name,
                     "source": source,
                 })
                 .to_string()
             } else {
                 rows.iter()
-                    .map(|(d, s, i)| format!("{d} {s} {i}\n"))
+                    .map(|(d, s, i, n)| match n {
+                        Some(n) => format!("{d} {s} {i} {n}\n"),
+                        None => format!("{d} {s} {i}\n"),
+                    })
                     .collect()
             };
             Ok(answer(face, body).cacheable())
@@ -1241,9 +1416,56 @@ impl ReservationLocks {
     }
 }
 
-fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
+/// Record how a reserved call failed, beside its reservation, and hand the error back. The
+/// record is best-effort: if it cannot be written the reservation stays without an outcome,
+/// which refuses every retry until a curator clears it, so it never pays twice either way.
+async fn failed(
+    inv: &Invocation<'_>,
+    q: &Question,
+    classifier: &str,
+    digest: &str,
+    attempt: u32,
+    charged: bool,
+    error: Error,
+) -> Error {
+    let Some(at) = inv.now() else {
+        return error;
+    };
+    let (_, created) = atoms::date_time(at.as_millis());
+    let delay = u64::try_from(q.retry_delay.as_millis()).unwrap_or(u64::MAX);
+    let (_, retry_at) = atoms::date_time(at.as_millis().saturating_add(delay));
+    let message = error.to_string();
+    let message = if message.len() > MAX_RAW_BYTES {
+        format!(
+            "({} bytes, b3:{})",
+            message.len(),
+            digest_hex(message.as_bytes())
+        )
+    } else {
+        message
+    };
+    let failure = atoms::Failure {
+        attempt,
+        created,
+        classifier: classifier.to_string(),
+        kind: error.kind().to_string(),
+        message,
+        charged: if charged { "yes" } else { "unknown" }.to_string(),
+        retry_at,
+    };
+    let path = atoms::failure_path(&q.name, classifier, digest);
+    let reservation = atoms::reservation_path(&q.name, classifier, digest);
+    let _ = write_atom(
+        inv,
+        &path,
+        &atoms::failure_turtle(&path, &reservation, &failure),
+    )
+    .await;
+    error
+}
+
+fn judge_door(q: Arc<Question>, item_locks: Arc<ReservationLocks>) -> AsyncFnEndpoint {
     let budget_locks = Arc::new(ReservationLocks::default());
-    let item_locks = Arc::new(ReservationLocks::default());
     let n = q.name.clone();
     let mut inputs = item_inputs(true);
     inputs.push(as_spec(&PLAIN_FACES));
@@ -1252,8 +1474,12 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
         &format!("Judge an item for `{n}` with the pinned model"),
         "Idempotent: if the item's class is not `pending` (and not stale), answers it and writes \
          nothing; a model verdict already recorded for the current classifier (even unparsed) \
-         is never asked again. A reserved call without a recorded verdict is refused (Conflict) \
-         to avoid paying again after a failed call or write. Otherwise checks the source's \
+         is never asked again. A reserved call that FAILED (the call, its answer or the verdict \
+         write) is recorded beside its reservation and refused (RetryAfter, saying when) until \
+         the question's retry delay has passed; then the judge replaces the reservation under \
+         the item's lock and asks once more. A reserved call with no outcome recorded (in \
+         flight, or lost) is refused (Conflict) until a curator clears it, so nothing pays \
+         twice by accident. Otherwise checks the source's \
          daily budget (RetryAfter past it; the item stays pending), asks `urn:llm:<provider>:ask` (the pinned model, temperature \
          0, JSON), refuses an answer naming another model (Conflict), and records the model \
          verdict atom: the label, or an unparsed verdict with the raw text.",
@@ -1298,14 +1524,41 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
                 return Ok(reply("unchanged", None, "unparsed"));
             }
             let reservation_path = atoms::reservation_path(&q.name, &classifier, &item.digest);
-            if read_atom(inv, &reservation_path).await?.is_some() {
-                return Err(Error::Conflict(format!(
-                    "a model call for item {} was already reserved, but no verdict is recorded; \
-                     refused another call (reservation <{reservation_path}>)",
-                    item.digest
-                )));
-            }
             let (date, created) = now(inv)?;
+            // A reserved call is asked again only once its failure's retry time has passed or
+            // a curator cleared it; the new reservation's attempt makes that failure spent.
+            let attempt = match model_call(inv, &q, &classifier, &item.digest).await? {
+                None => 1,
+                Some(call) => {
+                    match (&call.reservation.cleared, &call.failure) {
+                        (Some(_), _) => {}
+                        (None, Some(f)) => {
+                            let at = atoms::millis_of(&f.retry_at).unwrap_or(u64::MAX);
+                            let now_ms = inv.now().map_or(0, |t| t.as_millis());
+                            if now_ms < at {
+                                return Err(Error::RetryAfter {
+                                    delay: Some(Duration::from_millis(at - now_ms)),
+                                    detail: format!(
+                                        "the model call for item {} failed at {} ({}); refused \
+                                         another call until its retry time, retry at {} (or a \
+                                         curator can clear <{}>)",
+                                        item.digest, f.created, f.kind, f.retry_at, call.name
+                                    ),
+                                });
+                            }
+                        }
+                        (None, None) => {
+                            return Err(Error::Conflict(format!(
+                                "a model call for item {} was already reserved at {}, but no \
+                                 verdict or failure is recorded (it may be in flight, or was \
+                                 lost); refused another call: a curator can clear it at <{}>",
+                                item.digest, call.reservation.created, call.name
+                            )));
+                        }
+                    }
+                    call.reservation.attempt + 1
+                }
+            };
             // Reserve under an async lock: no caller of this endpoint can observe the
             // same count before its predecessor's increment has been persisted. This is
             // endpoint-local; separate processes sharing atoms need storage-level CAS.
@@ -1337,14 +1590,17 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
             write_atom(
                 inv,
                 &reservation_path,
-                &atoms::reservation_turtle(&reservation_path, &name, &created),
+                &atoms::reservation_turtle(&reservation_path, &name, &created, attempt, None),
             )
             .await?;
             drop(reservation);
+            let fail = |charged: bool, error: Error| {
+                failed(inv, &q, &classifier, &item.digest, attempt, charged, error)
+            };
             let endpoint = format!("urn:llm:{}:ask", q.provider);
             let prompt = format!("{}\n\n{}", q.prompt, item.content);
             let system = instructions(&q);
-            let rep = inv
+            let asked = inv
                 .issue(request(
                     Verb::Source,
                     &endpoint,
@@ -1356,16 +1612,27 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
                         ("as", JSON),
                     ],
                 )?)
-                .await?;
-            let envelope: Value = serde_json::from_slice(&rep.bytes)
-                .map_err(|e| Error::Endpoint(format!("<{endpoint}> answered no JSON envelope: {e}")))?;
+                .await;
+            // Whether a failed call was billed is unknown; an answer was.
+            let rep = match asked {
+                Ok(rep) => rep,
+                Err(e) => return Err(fail(false, e).await),
+            };
+            let envelope: Value = match serde_json::from_slice(&rep.bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    let e = Error::Endpoint(format!("<{endpoint}> answered no JSON envelope: {e}"));
+                    return Err(fail(true, e).await);
+                }
+            };
             let answered_by = envelope["model"].as_str().unwrap_or("");
             if answered_by != q.model {
-                return Err(Error::Conflict(format!(
+                let e = Error::Conflict(format!(
                     "<{endpoint}> answered as model `{answered_by}`, not the pinned `{}`: refused, \
                      no verdict recorded",
                     q.model
-                )));
+                ));
+                return Err(fail(true, e).await);
             }
             let text = envelope["text"].as_str().unwrap_or("");
             let label = parse_label(&q, text);
@@ -1388,7 +1655,10 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
                 prompt: &prompt_iri,
                 prompt_digest: &c.prompt_digest,
             });
-            write_atom(inv, &atoms::model_path(&q.name, &classifier, &item.digest), &atom).await?;
+            let path = atoms::model_path(&q.name, &classifier, &item.digest);
+            if let Err(e) = write_atom(inv, &path, &atom).await {
+                return Err(fail(true, e).await);
+            }
             if let Some(it) = &item.item {
                 let path = atoms::model_last_path(&q.name, it);
                 write_atom(inv, &path, &atoms::last_turtle(&path, it, &item.digest)).await?;
@@ -1397,6 +1667,136 @@ fn judge_door(q: Arc<Question>) -> AsyncFnEndpoint {
                 Some(l) => reply("judged", Some(&l.name), "model"),
                 None => reply("unparsed", None, "model"),
             })
+        })
+    })
+    .with_description(d)
+}
+
+fn reservation_door(q: Arc<Question>, item_locks: Arc<ReservationLocks>) -> AsyncFnEndpoint {
+    let n = q.name.clone();
+    let bindings = || {
+        vec![
+            binding("classifier", "the classifier's bare-hex digest"),
+            binding("digest", "the text's bare-hex digest"),
+        ]
+    };
+    let d = describe(
+        &format!("judge-{n}-reservation"),
+        &format!("A reserved model call for `{n}`, and a curator's clear"),
+        "Source: the model call the judge reserved for a classifier and a text digest, as \
+         text: its attempt, when it was reserved, and what became of it (a verdict recorded; \
+         failed, with when, the error, whether charged and the retry time; cleared by a \
+         curator; or reserved with no outcome recorded). NotFound until the judge reserves one. \
+         Cacheable on the atoms' threads. Delete: a CURATOR's clear, allowing the judge to ask \
+         again at once; logged beside the reservation with who, when and the failure it \
+         cleared. Any other principal is Denied; an item whose verdict is recorded has nothing \
+         to clear (Conflict).",
+        Verb::Source,
+        Some(read_cap(&n)),
+        bindings(),
+        &[TEXT],
+    )
+    .action({
+        let mut spec = ActionSpec::new(Verb::Delete)
+            .summary("a curator's clear: the judge may ask the model again at once")
+            .requires(clear_cap(&n))
+            .output(TEXT)
+            .fails(FailureClass::Permanent)
+            .fails(FailureClass::Unknown);
+        for b in bindings() {
+            spec = spec.input(b);
+        }
+        spec
+    });
+    AsyncFnEndpoint::new(format!("judge-{n}-reservation"), move |inv| {
+        let q = q.clone();
+        let item_locks = item_locks.clone();
+        Box::pin(async move {
+            let c = hex_binding(inv, "classifier")?;
+            let digest = hex_binding(inv, "digest")?;
+            let name = reservation_name(&q.name, &c, &digest);
+            let path = atoms::reservation_path(&q.name, &c, &digest);
+            let verdict = atoms::model_path(&q.name, &c, &digest);
+            if inv.request.verb != Verb::Delete {
+                let Some(call) = model_call(inv, &q, &c, &digest).await? else {
+                    return Err(Error::NotFound(name));
+                };
+                let mut out = format!(
+                    "reservation {name}\nattempt {}\nreserved {}\n",
+                    call.reservation.attempt, call.reservation.created
+                );
+                if read_atom(inv, &verdict).await?.is_some() {
+                    out.push_str(&format!(
+                        "verdict recorded {}\n",
+                        model_name(&q.name, &c, &digest)
+                    ));
+                } else {
+                    out.push_str(&format!("{}\n", call.sentence()));
+                }
+                return Ok(answer(TEXT, out).cacheable());
+            }
+            let who = principal(inv, &q).to_string();
+            if !q.is_curator(&who) {
+                return Err(Error::Denied(format!(
+                    "only a curator of `{}` can clear a reserved model call; {who} is not one",
+                    q.name
+                )));
+            }
+            // The judge's item lock: a clear never lands while this item's call is in flight
+            // in this endpoint, so it cannot let a second call start beside the first.
+            let item_lock = item_locks.for_key(&c, &digest);
+            let _item = item_lock.lock().await;
+            if read_atom(inv, &verdict).await?.is_some() {
+                return Err(Error::Conflict(format!(
+                    "a verdict is recorded for item {digest} ({}); there is no reserved call to \
+                     clear",
+                    model_name(&q.name, &c, &digest)
+                )));
+            }
+            let Some(Call {
+                reservation,
+                failure,
+                ..
+            }) = model_call(inv, &q, &c, &digest).await?
+            else {
+                return Err(Error::NotFound(name));
+            };
+            let reply = |attempt: u32| {
+                answer(
+                    TEXT,
+                    format!("cleared attempt {attempt}; the judge may ask again\n"),
+                )
+            };
+            if reservation.cleared.is_some() {
+                return Ok(reply(reservation.attempt));
+            }
+            let (_, at) = now(inv)?;
+            // Log first, so a clear never takes effect unrecorded.
+            let log = atoms::cleared_path(&q.name, &c, &digest);
+            let mut text = read_atom(inv, &log).await?.unwrap_or_default();
+            text.push_str(&atoms::cleared_turtle(
+                &format!("{name}:cleared:{}", reservation.attempt),
+                &path,
+                &who,
+                &at,
+                reservation.attempt,
+                failure.as_ref(),
+            ));
+            write_atom(inv, &log, &text).await?;
+            let model = model_name(&q.name, &c, &digest);
+            write_atom(
+                inv,
+                &path,
+                &atoms::reservation_turtle(
+                    &path,
+                    &model,
+                    &reservation.created,
+                    reservation.attempt,
+                    Some((&who, &at)),
+                ),
+            )
+            .await?;
+            Ok(reply(reservation.attempt))
         })
     })
     .with_description(d)

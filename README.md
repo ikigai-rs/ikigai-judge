@@ -34,6 +34,8 @@ model/{q}/{classifier}/{digest}.ttl      a model verdict, written once (the judg
 model/{q}/last/{item}.ttl                the item's last digest the judge judged
 model/{q}/spent/{source}/{date}.ttl      model calls spent that day
 model/{q}/reserved/{classifier}/{digest}.ttl  a model call reserved before asking
+model/{q}/reserved/{classifier}/{digest}.failed.ttl   how that call failed, if it did
+model/{q}/reserved/{classifier}/{digest}.cleared.ttl  the curators' clears, appended
 person/{principal}/{q}/{digest}.ttl      a person's latest correction (their corridor)
 person/{principal}/{q}/last/{item}.ttl   the item's last digest that person corrected
 ```
@@ -58,10 +60,12 @@ own question's capability.
 | `urn:iki:judge:model:{q}:{classifier}:{digest}` | Source | the model verdict atom; NotFound until written | read |
 | `urn:iki:judge:person:{q}:{digest}` | Source | the latest correction in the CALLER's corridor (a caller naming no principal reads the shared view) | read |
 | `urn:iki:judge:class:{q}:{digest}` | Source | the class and the producer that decided (`spam model`, `ham stale <old digest>`, `pending`); a READ, never writes | read |
-| `urn:iki:judge:why:{q}:{digest}` | Source | every verdict that exists, ranked, each with its provenance, and bayes's clues; text, Turtle, HTML, JSON | read |
-| `urn:iki:judge:pending:{q}:{source}` | Source | of the items given, those `pending`, `stale` (queued for re-judging) or `unparsed` (needs a person) | read |
+| `urn:iki:judge:why:{q}:{digest}` | Source | every verdict that exists, ranked, each with its provenance, bayes's clues, and a reserved model call with no verdict yet (failed, cleared, or no outcome recorded); text, Turtle, HTML, JSON | read |
+| `urn:iki:judge:pending:{q}:{source}` | Source | of the items given, those `pending`, `stale` (queued for re-judging), `unparsed` (needs a person), `failed` (`model call failed, retry at <time>`) or `reserved` (a call with no outcome recorded; a curator can clear it) | read |
 | `urn:iki:judge:disagreements:{q}` | Source | **the signal**: of the items given, every one where the deciding verdict and another producer disagree | read |
 | `urn:iki:judge:spent:{q}:{source}:{date}` | Source | `spent <n> of <budget>` | read |
+| `urn:iki:judge:reservation:{q}:{classifier}:{digest}` | Source | the reserved model call for an item: its attempt, when, and what became of it | read |
+| `urn:iki:judge:reservation:{q}:{classifier}:{digest}` | Delete | **a curator's clear**: the judge may ask again at once; logged (below) | `urn:cap:judge:clear:{q}`, and a curator |
 | `urn:iki:judge:judge:{q}` | Sink | judge one item with the pinned model (below) | `urn:cap:judge:judge:{q}` |
 | `urn:iki:judge:correct:{q}` | Sink | **the resolution** (below) | `urn:cap:judge:correct:{q}` |
 
@@ -90,6 +94,34 @@ The model verdict as stored is an `oa:Annotation` with `oa:motivatedBy oa:classi
 `dcterms:created`, `prov:wasAssociatedWith` the provider endpoint and `prov:wasGeneratedBy` the
 run, which is a `prov:Activity` recording the model id (`schema:instrument`), the prompt it
 used (`prov:used`) and the prompt digest (`schema:version`). Published terms only.
+
+### A failed call, and its retry
+
+Before asking, the judge writes a durable **reservation** for the item and counts its attempts,
+so no call is paid for twice by accident. When the call fails (the provider's error, an answer
+that is not a JSON envelope, an envelope naming another model) or its verdict write fails, the
+judge records the failure **beside the reservation**: when, which classifier, the error's kind
+and message, and whether the call was charged (`yes` when the model answered, `unknown` when
+the call itself failed). `why` says `model call failed at <time>: <kind>: <message>; charged:
+<yes|unknown>; retry at <time>`, and `pending` lists the item as `failed … model call failed,
+retry at <time>`.
+
+- Before the retry time a judge of the item is refused with `RetryAfter`, its delay the time
+  left and its message the retry time. The delay is the question's
+  (`Question::retry_after`, an hour by default).
+- After it, the judge replaces the reservation (the next attempt) under the item's lock and
+  asks once; concurrent judges wait on that lock and reuse its verdict. A failure recorded for
+  an earlier attempt is spent.
+- A **curator** can clear the reservation at once: a `Delete` on
+  `urn:iki:judge:reservation:{q}:{classifier}:{digest}`, holding `urn:cap:judge:clear:{q}` and a
+  write on `<root>/model/{q}/reserved`. Any other principal is `Denied`. The clear is appended
+  to the log beside the reservation (who, when, the attempt and the failure it cleared) before
+  it takes effect, and it waits for the item's lock, so it never lets a second call start
+  beside one in flight.
+- A reservation with **no outcome** recorded (the request was canceled, the process stopped,
+  or the call is still in flight) is never retried on its own: the judge refuses it with
+  `Conflict`, `pending` lists it as `reserved`, and a curator clears it once the provider's
+  outcome is known.
 
 A new model or prompt is a new classifier, so a new name: old verdicts stay readable. List the
 old classifier with `Question::previous` and its verdicts keep answering after the current
@@ -155,15 +187,16 @@ the verdict read, budget reservation, model request, and verdict writes. A calle
 for the same item re-reads its verdict before reserving any budget, including when callers
 name different sources. Before asking, both the budget charge and a durable item reservation
 are persisted while holding both locks. A budget refusal returns `RetryAfter` with the delay
-until the next UTC day. Failed calls still spend their reservation. A failed reservation write
-also retains the conservative budget charge, but the model is not called.
+until the next UTC day. Failed calls still spend their reservation, and a retry spends
+another. A failed reservation write also retains the conservative budget charge, but the model
+is not called.
 
-A reservation without a verdict returns `Conflict` on later attempts, without another charge
-or model call. The item stays pending. This covers failed model requests, cancellation,
-wrong-model answers, and failed verdict writes, including after an endpoint restart. The
-reservation is retained and never automatically expires: an operator must reconcile the
-provider's outcome before removing it to allow a retry. Successful verdicts, including
-unparsed answers, continue to be returned normally.
+A reservation without a verdict refuses later attempts without another charge or model call,
+including after an endpoint restart: with `RetryAfter` until its recorded failure's retry
+time, and with `Conflict` when no outcome is recorded (see [A failed call, and its
+retry](#a-failed-call-and-its-retry)). The failure record is best-effort: if it cannot be
+written, the reservation has no outcome and waits for a curator. Successful verdicts,
+including unparsed answers, continue to be returned normally.
 
 The correct endpoint holds a lock for each corridor and content digest from the person atom
 write through the bayes train. Concurrent corrections of one item land one after another, so
@@ -182,9 +215,13 @@ resolves it and trains bayes, a mapping-vs-model and a stale-vs-bayes disagreeme
 verdict after an edit and its re-judging, two principals' corrections that do not see each
 other and a reader correction that leaves the shared model digest unchanged, the budget,
 an unparsed answer that is never retried, a wrong-model envelope, and the caching (measured
-with `Kernel::is_cached`). `tests/conformance.rs` runs
+with `Kernel::is_cached`). `tests/retry.rs` drives a fake model that fails, then answers: the
+failure in `why` and `pending`, the refusal before the retry time, one call after it (also
+with eight concurrent judges), a curator's clear and its log, and a call with no outcome
+recorded. `tests/conformance.rs` runs
 [`ikigai-conformance`](https://github.com/ikigai-rs/ikigai-conformance) 0.12 over every door:
-zero findings, nothing unprobed. CI also lints the lib on `wasm32-unknown-unknown`.
+zero findings, nothing unprobed (the curator's `Delete`, which takes no `content` for the walk
+to pipe, is opted out with that reason and fired in `tests/retry.rs`). CI also lints the lib on `wasm32-unknown-unknown`.
 
 ## Accessibility
 
