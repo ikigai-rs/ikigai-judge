@@ -379,6 +379,206 @@ fn a_stale_verdict_against_bayes_on_the_new_text_is_a_disagreement() {
 
 // --- the judge's refusals -----------------------------------------------------------------
 
+/// A yielding fake holds the first answer in flight while the other judges arrive.
+/// Different sources must still share the item's reservation, even with a budget of one.
+#[test]
+fn concurrent_judges_of_one_item_ask_the_model_once() {
+    for answer in [r#"{"label":"spam"}"#, "no label"] {
+        let h = Host::with(question().budget(1));
+        h.fake.answer(answer);
+        let cap = h.worker();
+        let iri = format!("urn:iki:judge:judge:{Q}");
+        let requests: Vec<_> = (0..8)
+            .map(|n| {
+                request(
+                    Verb::Sink,
+                    &iri,
+                    &[
+                        ("content", "one shared item"),
+                        ("source", if n % 2 == 0 { "form" } else { "other" }),
+                    ],
+                )
+            })
+            .collect();
+        let results = futures::executor::block_on(futures::future::join_all(
+            requests.into_iter().map(|r| h.kernel.issue(r, &cap)),
+        ));
+        assert_eq!(h.fake.calls(), 1, "one paid call for this item");
+        for result in results {
+            result.unwrap();
+        }
+        let spent: u32 = ["form", "other"]
+            .into_iter()
+            .map(|source| {
+                h.text(
+                    Verb::Source,
+                    &format!("urn:iki:judge:spent:{Q}:{source}:2026-10-31"),
+                    &[],
+                )
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+            })
+            .sum();
+        assert_eq!(spent, 1);
+        h.judge("one shared item", &[]).unwrap();
+        assert_eq!(h.fake.calls(), 1, "the recorded verdict is reused");
+    }
+}
+
+#[test]
+fn a_judge_arriving_while_the_model_answers_reuses_its_verdict() {
+    let h = Host::new();
+    let (release, gate) = futures::channel::oneshot::channel();
+    *h.fake.gate.lock().unwrap() = Some(gate);
+    let cap = h.worker();
+    let iri = format!("urn:iki:judge:judge:{Q}");
+    let first = request(
+        Verb::Sink,
+        &iri,
+        &[("content", "in-flight item"), ("source", "form")],
+    );
+    let later = request(
+        Verb::Sink,
+        &iri,
+        &[("content", "in-flight item"), ("source", "other")],
+    );
+    futures::executor::block_on(async {
+        let first = h.kernel.issue(first, &cap);
+        let later = h.kernel.issue(later, &cap);
+        futures::pin_mut!(first, later);
+        assert!(futures::poll!(&mut first).is_pending());
+        assert_eq!(h.fake.calls(), 1, "the first model call has started");
+        assert!(futures::poll!(&mut later).is_pending());
+        release.send(()).unwrap();
+        let (first, later) = futures::join!(first, later);
+        assert_eq!(
+            String::from_utf8(first.unwrap().bytes).unwrap(),
+            "judged spam model\n"
+        );
+        assert_eq!(
+            String::from_utf8(later.unwrap().bytes).unwrap(),
+            "unchanged spam model\n"
+        );
+    });
+    assert_eq!(h.fake.calls(), 1);
+}
+
+#[test]
+fn a_failed_verdict_write_never_pays_for_the_item_again() {
+    let h = Host::new();
+    // Permit reservations, but refuse the verdict write after the fake model answers.
+    let cap = Capability::scoped([
+        format!("urn:cap:judge:read:{Q}"),
+        format!("urn:cap:judge:judge:{Q}"),
+        h.fs("read", ""),
+        h.fs("write", &format!("/model/{Q}/spent")),
+        h.fs("write", &format!("/model/{Q}/reserved")),
+        format!("urn:cap:bayes:read:{Q}"),
+    ]);
+    let iri = format!("urn:iki:judge:judge:{Q}");
+    assert!(h
+        .issue_as(
+            &cap,
+            Verb::Sink,
+            &iri,
+            &[("content", HAMMY), ("source", "form")]
+        )
+        .is_err());
+    assert_eq!(h.fake.calls(), 1);
+    assert_eq!(h.class(HAMMY, &[]), "pending\n");
+    let err = h.judge(HAMMY, &[]).unwrap_err();
+    assert!(
+        matches!(err, Error::Conflict(ref detail) if detail.contains("already reserved")),
+        "{err}"
+    );
+
+    // A new endpoint instance over the same storage must also honor the saved attempt.
+    let root = std::sync::Arc::new(ikigai_core::Fallback::new(vec![
+        std::sync::Arc::new(ikigai_judge::space([question()])),
+        h.root_space.clone(),
+    ]));
+    let kernel = ikigai_core::Kernel::with_meta_renderer(
+        root,
+        std::sync::Arc::new(ikigai_vocab::TurtleRenderer),
+    )
+    .with_clock(std::sync::Arc::new(ikigai_core::FixedClock::at(NOW)));
+    let err = futures::executor::block_on(kernel.issue(
+        request(Verb::Sink, &iri, &[("content", HAMMY), ("source", "other")]),
+        &h.worker(),
+    ))
+    .unwrap_err();
+    assert!(matches!(err, Error::Conflict(_)), "{err}");
+    assert_eq!(h.fake.calls(), 1);
+    assert_eq!(
+        h.text(
+            Verb::Source,
+            &format!("urn:iki:judge:spent:{Q}:form:2026-10-31"),
+            &[]
+        ),
+        "spent 1 of 100\n"
+    );
+    assert_eq!(
+        h.text(
+            Verb::Source,
+            &format!("urn:iki:judge:spent:{Q}:other:2026-10-31"),
+            &[]
+        ),
+        "spent 0 of 100\n"
+    );
+}
+
+#[test]
+fn a_canceled_model_call_is_not_paid_again() {
+    let h = Host::new();
+    let (_release, gate) = futures::channel::oneshot::channel();
+    *h.fake.gate.lock().unwrap() = Some(gate);
+    let cap = h.worker();
+    let iri = format!("urn:iki:judge:judge:{Q}");
+    futures::executor::block_on(async {
+        let attempt = h.kernel.issue(
+            request(Verb::Sink, &iri, &[("content", HAMMY), ("source", "form")]),
+            &cap,
+        );
+        futures::pin_mut!(attempt);
+        assert!(futures::poll!(&mut attempt).is_pending());
+        assert_eq!(h.fake.calls(), 1);
+        // Leaving this scope drops the request while its model response is outstanding.
+    });
+    assert!(matches!(h.judge(HAMMY, &[]), Err(Error::Conflict(_))));
+    assert_eq!(h.fake.calls(), 1);
+    assert_eq!(h.class(HAMMY, &[]), "pending\n");
+}
+
+#[test]
+fn a_failed_item_reservation_never_calls_the_model() {
+    let h = Host::new();
+    let classifier = question().classifier().digest();
+    let cap = Capability::scoped([
+        format!("urn:cap:judge:read:{Q}"),
+        format!("urn:cap:judge:judge:{Q}"),
+        h.fs("read", ""),
+        h.fs("write", &format!("/model/{Q}/spent")),
+        h.fs("write", &format!("/model/{Q}/{classifier}")),
+        format!("urn:cap:bayes:read:{Q}"),
+    ]);
+    assert!(h
+        .issue_as(
+            &cap,
+            Verb::Sink,
+            &format!("urn:iki:judge:judge:{Q}"),
+            &[("content", HAMMY), ("source", "form")]
+        )
+        .is_err());
+    assert_eq!(h.fake.calls(), 0);
+    assert_eq!(h.class(HAMMY, &[]), "pending\n");
+    // A reservation that was never saved must not strand the item.
+    h.judge(HAMMY, &[]).unwrap();
+    assert_eq!(h.fake.calls(), 1);
+}
+
 #[test]
 fn concurrent_judgments_reserve_only_the_available_model_calls() {
     const CALLERS: usize = 8;
@@ -500,6 +700,12 @@ fn an_envelope_naming_another_model_is_refused_and_nothing_is_recorded() {
     let err = h.judge(HAMMY, &[]).unwrap_err();
     assert!(matches!(err, Error::Conflict(_)), "{err}");
     assert_eq!(h.class(HAMMY, &[]), "pending\n");
+    assert!(matches!(h.judge(HAMMY, &[]), Err(Error::Conflict(_))));
+    assert_eq!(
+        h.fake.calls(),
+        1,
+        "a refused model answer is still a paid attempt"
+    );
     let classifier = h.text(Verb::Source, &format!("urn:iki:judge:classifier:{Q}"), &[]);
     let digest = ikigai_judge::digest_hex(HAMMY.as_bytes());
     assert!(matches!(

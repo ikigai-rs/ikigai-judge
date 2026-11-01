@@ -30,7 +30,8 @@ All of it is in `src/endpoints.rs`.
   face, a label not in the question, a `source` that is not a segment, a `date` not
   `YYYY-MM-DD`, an `items` array that does not hold), a text past its bound (`refused, not
   truncated`), a digest that is not the text's, a day's budget spent (`the item stays
-  pending`), a model envelope naming another model, no clock configured.
+  pending`), a model envelope naming another model, no clock configured, or an item with a
+  reserved model call but no verdict (refused to avoid paying again).
 
 **A model's raw answer is the model's, not this repository's.** When an answer names no label,
 it is kept as an unparsed verdict and shown as written in the `why` provenance
@@ -54,7 +55,9 @@ any page a host puts the text faces in.
 - `tests/judge.rs`: `why_has_text_turtle_and_html_faces` (the page starts `<!doctype html>`, the
   text face starts `class `), `a_text_past_the_bound_is_refused_not_truncated`,
   `past_the_budget_the_judge_refuses_until_tomorrow_and_the_item_stays_pending`,
-  `a_digest_that_is_not_the_texts_is_refused`, and the producer tests that check each class line.
+  `a_digest_that_is_not_the_texts_is_refused`,
+  `a_failed_verdict_write_never_pays_for_the_item_again` (the refusal names the saved
+  reservation and says no verdict is recorded), and the producer tests that check each class line.
 - Nothing tests the HTML page's structure beyond its first line. **No automated accessibility
   checker, browser or assistive technology has been used on this output.**
 

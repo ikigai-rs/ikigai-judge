@@ -33,6 +33,7 @@ scored on that model. Nothing here writes ikigai-store, where one write cuts eve
 model/{q}/{classifier}/{digest}.ttl      a model verdict, written once (the judge)
 model/{q}/last/{item}.ttl                the item's last digest the judge judged
 model/{q}/spent/{source}/{date}.ttl      model calls spent that day
+model/{q}/reserved/{classifier}/{digest}.ttl  a model call reserved before asking
 person/{principal}/{q}/{digest}.ttl      a person's latest correction (their corridor)
 person/{principal}/{q}/last/{item}.ttl   the item's last digest that person corrected
 ```
@@ -78,7 +79,7 @@ stays `pending`, nothing is called and nothing is truncated), spends one call, a
 `urn:llm:<provider>:ask` (the pinned model, temperature 0, the label set in the system prompt,
 the JSON envelope), and:
 
-- an envelope naming **another model** is refused (`Conflict`), and nothing is recorded;
+- an envelope naming **another model** is refused (`Conflict`), and no verdict is recorded;
 - an answer naming a label from the **closed set** (`{"label": "spam"}` or the bare label) is
   recorded as the model verdict;
 - **anything else** is recorded as an unparsed verdict with its raw text (`oa:bodyValue`): it
@@ -148,8 +149,22 @@ The only recursive parse of request input is `items` and the model's envelope, b
 `serde_json`, which refuses nesting past 128 levels.
 
 The judge endpoint serializes each source's daily budget check and increment, reserving a
-call before asking the model. It releases the lock before the model request. Refusals return
-`RetryAfter` with the delay until the next UTC day. Failed calls still spend their reservation.
+call before asking the model. It releases the budget lock before the model request so
+unrelated items can proceed. A separate lock for each classifier and content digest covers
+the verdict read, budget reservation, model request, and verdict writes. A caller waiting
+for the same item re-reads its verdict before reserving any budget, including when callers
+name different sources. Before asking, both the budget charge and a durable item reservation
+are persisted while holding both locks. A budget refusal returns `RetryAfter` with the delay
+until the next UTC day. Failed calls still spend their reservation. A failed reservation write
+also retains the conservative budget charge, but the model is not called.
+
+A reservation without a verdict returns `Conflict` on later attempts, without another charge
+or model call. The item stays pending. This covers failed model requests, cancellation,
+wrong-model answers, and failed verdict writes, including after an endpoint restart. The
+reservation is retained and never automatically expires: an operator must reconcile the
+provider's outcome before removing it to allow a retry. Successful verdicts, including
+unparsed answers, continue to be returned normally.
+
 This coordination covers concurrent calls sharing one endpoint instance. Separate endpoint
 instances or processes sharing the same atoms still require external coordination, such as
 one worker per question, or storage-level compare-and-set.
