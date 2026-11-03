@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-judge"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Judgments as resources for ikigai: classify items as recorded verdicts (person, mapping, model, bayes, pending), with a disagreement signal and correction as the resolution."
@@ -15,9 +15,9 @@ categories = ["wasm", "text-processing"]
 # Async budget reservation locks work on native and browser executors.
 futures = { version = "0.3", default-features = false, features = ["std"] }
 # The released kernel, consumed from crates.io: the same version the hosts use, so a host
-# links exactly one `ikigai-core`. 0.2.10 is the newest published. ⚠ `"0.2.10"` is also a
-# ceiling below 0.3.0.
-ikigai-core = "0.2.10"
+# links exactly one `ikigai-core`. 0.3.0 for the scoped content store (ledger #2965): held
+# content belongs to whoever delivered it. ⚠ `"0.3.0"` is also a ceiling below 0.4.0.
+ikigai-core = "0.3.0"
 # Reading the stored Turtle atoms back. Both are wasm-clean; in the browser oxrdf's `rand`
 # needs getrandom's JS backend (below), as in ikigai-core's `declare` feature.
 oxrdf = "0.3"
@@ -35,8 +35,10 @@ getrandom = { version = "0.3.4", features = ["wasm_js"] }
 # model, `ikigai-vocab`'s Meta face, and the module recipe (`ikigai-conformance`) as one test.
 # The judge itself links none of them: it reaches each through the kernel by name.
 futures = "0.3"
-ikigai-bayes = "0.3.0"
-ikigai-conformance = "0.12.1"
-ikigai-fs = "0.3.0"
-ikigai-vocab = "0.2.10"
+# bayes 0.4.0 and fs 0.4.0 are their releases on ikigai-core 0.3 (ledger #2965); the 0.3 lines
+# link the old core beside this one.
+ikigai-bayes = "0.4.0"
+ikigai-conformance = "0.14.0"
+ikigai-fs = "0.4.0"
+ikigai-vocab = "0.3.0"
 serde_json = "1"

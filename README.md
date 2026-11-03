@@ -18,7 +18,7 @@ becomes confident the other way; that case is a **disagreement**, listed by
 `urn:iki:judge:disagreements:{q}` with both answers and their provenance, and a **correction**
 resolves it.
 
-**Status:** 0.1.0, not published. The design is ledger #2677.
+**Status:** 0.2.0 on ikigai-core 0.3.0, not published (0.1.0 is the published release). The design is ledger #2677.
 
 ## Only what cannot be recomputed is stored
 
