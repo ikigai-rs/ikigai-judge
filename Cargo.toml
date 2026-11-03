@@ -35,8 +35,10 @@ getrandom = { version = "0.3.4", features = ["wasm_js"] }
 # model, `ikigai-vocab`'s Meta face, and the module recipe (`ikigai-conformance`) as one test.
 # The judge itself links none of them: it reaches each through the kernel by name.
 futures = "0.3"
-ikigai-bayes = "0.3.0"
+# bayes 0.4.0 and fs 0.4.0 are their releases on ikigai-core 0.3 (ledger #2965); the 0.3 lines
+# link the old core beside this one.
+ikigai-bayes = "0.4.0"
 ikigai-conformance = "0.14.0"
-ikigai-fs = "0.3.0"
+ikigai-fs = "0.4.0"
 ikigai-vocab = "0.3.0"
 serde_json = "1"
