@@ -11,7 +11,7 @@ a conformance claim. Adapted from the
 | Status | Evaluation in progress. No conformance claim. |
 | Owner | the maintainers of this repository |
 | Report a barrier | [a GitHub issue](https://github.com/ikigai-rs/ikigai-judge/issues/new?labels=accessibility) with the `accessibility` label; anything security-sensitive through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-judge/security/advisories/new) |
-| Last reviewed | 2026-11-01 |
+| Last reviewed | 2026-11-06 |
 
 ## What it emits that people read
 
@@ -27,9 +27,11 @@ All of it is in `src/endpoints.rs`.
   <principal> at <time>; the judge may ask again`, or `model call reserved at <time>, no
   verdict or failure recorded; a curator can clear it`), followed by the reservation's name.
   Four faces: text (`why_text`, the deciding
-  verdict marked `*`), **an HTML page** (`why_html`: an `<h1>` naming the class, an ordered
-  list of verdicts with the deciding one in `<strong>`, a list of clues, the model call's
-  sentence in a `<p>`), Turtle and JSON.
+  verdict marked `*` and ending `(decided)`), **an HTML page** (`why_html`: `<html lang="en">`,
+  a viewport meta, one `<main>` holding an `<h1>` naming the class, the model call's sentence
+  in a `<p>`, an ordered list of verdicts under the heading `Verdicts, in rank order` with the
+  deciding one ending `(decided)`, and a list of clues under `Clues from bayes`, each
+  `probability <p> <token>`), Turtle and JSON.
 - **Lists and counts**: `pending` (one `<digest> <pending|stale|unparsed|failed|reserved>
   <item>` line each; a `failed` line ends `model call failed, retry at <time>`, a `reserved`
   line `model call reserved, no verdict or failure recorded; a curator can clear it`),
@@ -64,8 +66,12 @@ any page a host puts the text faces in.
   `pending`, and a verdict on old text says `stale`.
 - A bound refuses and says so; nothing is cut short. An invalid input is named, with the form it
   takes.
-- The HTML page has a `<title>` and one `<h1>` naming the class, the verdicts in an `<ol>` in
-  rank order, every value from a verdict or a token escaped, and no style or script.
+- The HTML page says its language (`lang="en"`), has a viewport meta, a `<title>`, one
+  `<main>` and one `<h1>` naming the class, a heading before each list, the verdicts in an
+  `<ol>` in rank order, and no style or script. Every value on it is escaped with
+  `ikigai_fn::html::html_text`, the one escaping implementation, not a private one.
+- Which verdict decided is said in words, `(decided)`, on the page and the text face, never by
+  bold or a mark alone.
 - No color is written.
 
 ## How it is tested
@@ -81,19 +87,19 @@ any page a host puts the text faces in.
   same sentence on the HTML page and in JSON and Turtle (`every_why_face_says_the_call_failed`),
   the cleared and no-outcome sentences, and the refusals before the retry time and for a
   non-curator's clear.
-- Nothing tests the HTML page's structure beyond its first line. **No automated accessibility
+- `tests/judge.rs`:
+  `the_why_page_has_a_language_one_main_a_viewport_headings_and_says_which_verdict_decided`
+  checks the page's shape (`lang`, the viewport, one `<main>`, one `<h1>`, both headings, one
+  `(decided)` and no `<strong>`, a clue's number labeled `probability`) and the text face's one
+  `(decided)`.
+- Nothing checks the page beyond those strings: no HTML validator. **No automated accessibility
   checker, browser or assistive technology has been used on this output.**
 
 ## Known limitations
 
 Found by reading the source on 2026-10-31:
 
-- The `why` page's `<html>` has no `lang`, there is no `<main>`, and there is no viewport meta,
-  so it is not laid out for a phone.
-- On the `why` page, which verdict decided is shown only by bold (`<strong>`), which a screen
-  reader does not announce; on the text face only by a `*`. Neither says "decided" in words.
-- The page's two lists have no heading saying what they are, and each clue is a bare
-  probability and a token, with nothing saying what the number means.
+- A clue's `probability` does not say which label it is the probability of.
 - A verdict's provenance is a run of `key=value` pairs, and digests are long hex strings.
 - All text is English, with no way to choose another language.
 
@@ -118,3 +124,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-ju
 |---|---|
 | 2026-10-31 | First version. |
 | 2026-11-01 | A failed model call: its sentence in `why`, the `failed` and `reserved` lines in `pending`, the reservation resource, a curator's clear and their refusals. |
+| 2026-11-06 | The `why` page: `lang`, a viewport, one `<main>`, a heading on each list, the deciding verdict said `(decided)` (also on the text face) instead of bold, a clue's number labeled `probability`, escaping through `ikigai_fn::html`. Its shape is tested. |
