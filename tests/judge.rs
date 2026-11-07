@@ -870,3 +870,43 @@ fn threaded_recorrections_leave_the_verdict_and_bayes_agreeing() {
         "{divergent} of {ROUNDS} rounds diverged; {errors} corrections failed part-way"
     );
 }
+
+// --- the why page's shape (ACCESSIBILITY.md) ----------------------------------------------
+
+#[test]
+fn the_why_page_has_a_language_one_main_a_viewport_headings_and_says_which_verdict_decided() {
+    let h = Host::new();
+    teach_bayes(&h);
+    h.fake.answer("{\"label\": \"ham\"}");
+    let text = "cheap words";
+    let _ = h.judge(text, &[]);
+    let html = h.text(
+        Verb::Source,
+        &why_iri(text),
+        &[("content", text), ("as", "text/html")],
+    );
+    assert!(
+        html.starts_with("<!doctype html>\n<html lang=\"en\">"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"),
+        "{html}"
+    );
+    assert_eq!(html.matches("<main>").count(), 1, "{html}");
+    assert_eq!(html.matches("</main>").count(), 1, "{html}");
+    assert_eq!(html.matches("<h1>").count(), 1, "{html}");
+    assert!(
+        html.contains("<h2>Verdicts, in rank order</h2>\n<ol>"),
+        "{html}"
+    );
+    assert!(html.contains("<h2>Clues from bayes</h2>"), "{html}");
+    // The deciding verdict is said in words, not by bold alone; exactly one.
+    assert_eq!(html.matches("(decided)").count(), 1, "{html}");
+    assert!(!html.contains("<strong>"), "{html}");
+    // A clue's number says what it is.
+    assert!(html.contains("<li>probability "), "{html}");
+    // The text face says it in words too.
+    let plain = h.text(Verb::Source, &why_iri(text), &[("content", text)]);
+    assert_eq!(plain.matches(" (decided)\n").count(), 1, "{plain}");
+}
