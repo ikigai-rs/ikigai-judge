@@ -15,6 +15,7 @@ use ikigai_core::{
     ActionSpec, ArgRef, ArgSpec, AsyncFnEndpoint, Description, EndpointSpace, Error, Exact,
     FailureClass, Invocation, Iri, ReprType, Representation, Request, Result, UriTemplate, Verb,
 };
+use ikigai_fn::html::html_text;
 use serde_json::{json, Value};
 
 use crate::atoms::{self, escape, ModelRecord, Stored};
@@ -1110,9 +1111,14 @@ fn why_text(item: &Item, g: &Gathered, class: &str, call: Option<&Call>) -> Stri
         ));
     }
     for (rank, v) in g.verdicts.iter().enumerate() {
-        let mark = if deciding == Some(v) { "*" } else { " " };
+        // The `*` is kept for readers that look for it; the words say it to everyone else.
+        let (mark, decided) = if deciding == Some(v) {
+            ("*", " (decided)")
+        } else {
+            (" ", "")
+        };
         out.push_str(&format!(
-            "{mark}{} {} {} {}\n",
+            "{mark}{} {} {} {}{decided}\n",
             rank + 1,
             v.producer.name(),
             v.label.as_deref().unwrap_or("-"),
@@ -1125,59 +1131,63 @@ fn why_text(item: &Item, g: &Gathered, class: &str, call: Option<&Call>) -> Stri
     out
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
+/// The `why` page. Every value from a verdict, a token or a call is escaped with
+/// `ikigai_fn::html::html_text`, the one escaping implementation (the field guide's FND-H);
+/// the digests, the stale digest and the reservation name are hex or IRIs this module wrote,
+/// escaped anyway so the page needs no argument about which values are safe.
 fn why_html(item: &Item, g: &Gathered, class: &str, call: Option<&Call>) -> String {
     let deciding = decide(&g.verdicts);
     let mut out = format!(
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>class {c}</title></head><body>\n\
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>class {c}</title></head><body>\n<main>\n\
          <h1>class {c}</h1>\n<p>digest <code>{}</code></p>\n",
-        item.digest,
-        c = html_escape(class)
+        html_text(&item.digest),
+        c = html_text(class)
     );
     if let Some(from) = deciding
         .filter(|v| v.producer == Producer::Stale)
         .and(g.stale_from.as_ref())
     {
         out.push_str(&format!(
-            "<p>stale: the verdict on <code>{from}</code>, queued for re-judging</p>\n"
+            "<p>stale: the verdict on <code>{}</code>, queued for re-judging</p>\n",
+            html_text(from)
         ));
     }
     if let Some(call) = call {
         out.push_str(&format!(
             "<p>{}; reservation <code>{}</code></p>\n",
-            html_escape(&call.sentence()),
-            call.name
+            html_text(&call.sentence()),
+            html_text(&call.name)
         ));
     }
-    out.push_str("<ol>\n");
+    out.push_str("<h2>Verdicts, in rank order</h2>\n<ol>\n");
     for v in &g.verdicts {
-        let open = if deciding == Some(v) { "<strong>" } else { "" };
-        let close = if deciding == Some(v) { "</strong>" } else { "" };
+        // Said in words: bold alone is not announced by a screen reader.
+        let decided = if deciding == Some(v) {
+            " (decided)"
+        } else {
+            ""
+        };
         out.push_str(&format!(
-            "<li>{open}{} {}{close} <small>{}</small></li>\n",
+            "<li>{} {}{decided} <small>{}</small></li>\n",
             v.producer.name(),
-            html_escape(v.label.as_deref().unwrap_or("-")),
-            html_escape(&provenance_text(v))
+            html_text(v.label.as_deref().unwrap_or("-")),
+            html_text(&provenance_text(v))
         ));
     }
     out.push_str("</ol>\n");
     if !g.clues.is_empty() {
-        out.push_str("<ul>\n");
+        out.push_str("<h2>Clues from bayes</h2>\n<ul>\n");
         for (token, p) in &g.clues {
             out.push_str(&format!(
-                "<li>{p:.6} <code>{}</code></li>\n",
-                html_escape(token)
+                "<li>probability {p:.6} <code>{}</code></li>\n",
+                html_text(token)
             ));
         }
         out.push_str("</ul>\n");
     }
-    out.push_str("</body></html>\n");
+    out.push_str("</main>\n</body></html>\n");
     out
 }
 

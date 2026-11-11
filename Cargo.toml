@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-judge"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Judgments as resources for ikigai: classify items as recorded verdicts (person, mapping, model, bayes, pending), with a disagreement signal and correction as the resolution."
@@ -18,6 +18,9 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 # links exactly one `ikigai-core`. 0.3.0 for the scoped content store (ledger #2965): held
 # content belongs to whoever delivered it. ⚠ `"0.3.0"` is also a ceiling below 0.4.0.
 ikigai-core = "0.3.0"
+# `html::html_text`, the one HTML escaping implementation, for the `why` page (FND-H). 0.10.0
+# is the line on ikigai-core 0.3, so a host still links one kernel.
+ikigai-fn = "0.10.0"
 # Reading the stored Turtle atoms back. Both are wasm-clean; in the browser oxrdf's `rand`
 # needs getrandom's JS backend (below), as in ikigai-core's `declare` feature.
 oxrdf = "0.3"
