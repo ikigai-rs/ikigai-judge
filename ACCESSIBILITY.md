@@ -11,7 +11,7 @@ a conformance claim. Adapted from the
 | Status | Evaluation in progress. No conformance claim. |
 | Owner | the maintainers of this repository |
 | Report a barrier | [a GitHub issue](https://github.com/ikigai-rs/ikigai-judge/issues/new?labels=accessibility) with the `accessibility` label; anything security-sensitive through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-judge/security/advisories/new) |
-| Last reviewed | 2026-11-06 |
+| Last reviewed | 2026-11-12 |
 
 ## What it emits that people read
 
@@ -76,24 +76,30 @@ any page a host puts the text faces in.
 
 ## How it is tested
 
-- `tests/judge.rs`: `why_has_text_turtle_and_html_faces` (the page starts `<!doctype html>`, the
-  text face starts `class `), `a_text_past_the_bound_is_refused_not_truncated`,
-  `past_the_budget_the_judge_refuses_until_tomorrow_and_the_item_stays_pending`,
-  `a_digest_that_is_not_the_texts_is_refused`,
-  `a_failed_verdict_write_never_pays_for_the_item_again` (the refusal names the retry time),
-  and the producer tests that check each class line.
-- `tests/retry.rs`: the `why` text sentence and the `pending` line for a failed call, word
-  for word (`a_failed_call_is_reported_refused_until_its_retry_time_then_judged_once`), the
-  same sentence on the HTML page and in JSON and Turtle (`every_why_face_says_the_call_failed`),
-  the cleared and no-outcome sentences, and the refusals before the retry time and for a
-  non-curator's clear.
-- `tests/judge.rs`:
-  `the_why_page_has_a_language_one_main_a_viewport_headings_and_says_which_verdict_decided`
-  checks the page's shape (`lang`, the viewport, one `<main>`, one `<h1>`, both headings, one
-  `(decided)` and no `<strong>`, a clue's number labeled `probability`) and the text face's one
-  `(decided)`.
-- Nothing checks the page beyond those strings: no HTML validator. **No automated accessibility
-  checker, browser or assistive technology has been used on this output.**
+Every named check has a result: Pass, Fail or Blocked, with evidence. A Pass covers only
+that check, not overall accessibility. Passing checks below were performed on 2026-11-12 against
+main at [`c4c85b1`](https://github.com/ikigai-rs/ikigai-judge/commit/c4c85b135e4caa67ca7b9577523f76d6ae7d1ab4),
+before this documentation update. The Rust checks use Cargo 1.99.1 and rustc 1.99.1.
+CI repeats the Rust tests; they check output strings and behavior, not a rendered page or
+assistive technology use.
+
+| Check | Result | Evidence |
+|---|---|---|
+| Text, Turtle and HTML faces | Pass | `cargo test`, `tests/judge.rs::why_has_text_turtle_and_html_faces`: checks the HTML doctype, the text face's leading `class` and Turtle entity output; not full HTML validation. |
+| HTML language, viewport, landmarks, headings, list order and deciding verdict in words | Pass | `cargo test`, `tests/judge.rs::the_why_page_has_a_language_one_main_a_viewport_headings_and_says_which_verdict_decided`: checks `lang`, viewport, one main and h1, headings, ordered verdict list, one `(decided)` without strong markup, labeled clue probability and the text face's deciding verdict. String assertions do not test reading order in a browser. |
+| Bounds, budget and digest refusals | Pass | `cargo test`, `tests/judge.rs`: `a_text_past_the_bound_is_refused_not_truncated`, `past_the_budget_the_judge_refuses_until_tomorrow_and_the_item_stays_pending`, `a_digest_that_is_not_the_texts_is_refused` and `a_failed_verdict_write_never_pays_for_the_item_again`. Checks these refusals and retry time, not every possible message's clarity. |
+| Producer class lines | Pass | `cargo test`, `tests/judge.rs`: producer tests for pending, person, mapping, model, bayes and stale output, including `nothing_recorded_is_pending` and `an_edit_answers_the_previous_verdict_marked_stale_then_is_re_judged`. Checks expected class text, not comprehension. |
+| Failed, cleared and reserved model-call messages and refusals | Pass | `cargo test`, `tests/retry.rs`: `a_failed_call_is_reported_refused_until_its_retry_time_then_judged_once`, `every_why_face_says_the_call_failed`, `a_curator_clear_allows_an_immediate_retry_and_is_logged` and `a_call_with_no_recorded_outcome_waits_for_a_curator`. Checks text, pending lines, HTML/JSON/Turtle failure messages, retry and non-curator refusals; no assistive technology evaluation. |
+| HTML title, escaping, absence of style/script and color | Pass | Source inspection of `src/endpoints.rs::why_html` on 2026-11-12: title and values use `ikigai_fn::html::html_text`, lists have headings, and the function emits no style, script or color. Inspection covers this function, not host pages, rendered contrast or malicious-input testing. |
+| HTML validator | Blocked | No validator was run; no rendered-page validation workflow is configured in this repository. String assertions above are not a validator. |
+| Automated accessibility checker (axe or equivalent) | Blocked | No automated accessibility checker was run on this output; no browser checker workflow is configured in this repository. |
+| Browser rendering, zoom, reflow and contrast | Blocked | No browser evaluation was performed for this review; no interactive browser session was available. Unstyled HTML alone does not prove these checks pass. |
+| Manual keyboard | Blocked | No person performed a keyboard pass for this review; no interactive browser session was available. |
+| Screen reader | Blocked | No screen reader session was available or used for this review. |
+| Screen magnifier | Blocked | No magnifier session was available or used for this review. |
+| Speech input | Blocked | No speech-input session was available or used for this review. |
+| Switch access | Blocked | No switch-access session was available or used for this review. |
+| Braille display | Blocked | No braille display was available or used for this review. |
 
 ## Known limitations
 
@@ -107,7 +113,10 @@ Found by reading the source on 2026-10-31:
 
 Read this file before changing any output listed above: the faces, the page or the refusals.
 Keep meaning in words, never in bold, color or position alone. Say in the pull request what was
-tested, with what, and what was not.
+tested, with what, and what was not. Give each check a row in a `Check | Result | Evidence`
+table with Pass, Fail or Blocked, its test or command and tool version, or why it could not
+run. Keep unrun checks as Blocked, including each assistive technology nobody used.
+A historical run CI does not repeat is Blocked with its date, not Pass.
 
 ## Reporting a barrier
 
@@ -125,3 +134,4 @@ through [private vulnerability reporting](https://github.com/ikigai-rs/ikigai-ju
 | 2026-10-31 | First version. |
 | 2026-11-01 | A failed model call: its sentence in `why`, the `failed` and `reserved` lines in `pending`, the reservation resource, a curator's clear and their refusals. |
 | 2026-11-06 | The `why` page: `lang`, a viewport, one `<main>`, a heading on each list, the deciding verdict said `(decided)` (also on the text face) instead of bold, a clue's number labeled `probability`, escaping through `ikigai_fn::html`. Its shape is tested. |
+| 2026-11-12 | Recorded each accessibility check as Pass, Fail or Blocked, with current main test evidence and explicit limits; listed unrun browser and assistive technology checks as Blocked. |
