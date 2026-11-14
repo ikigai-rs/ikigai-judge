@@ -86,10 +86,13 @@ pub struct Classifier {
     pub prompt_digest: String,
     /// The label names, in order.
     pub labels: Vec<String>,
+    /// Digest of the resolved scheme bytes, when resource-backed.
+    pub scheme_digest: Option<String>,
 }
 
 impl Classifier {
-    /// The bare-hex digest over (provider, model, prompt digest, labels).
+    /// The bare-hex digest over provider, model, prompt digest, labels, and the optional
+    /// resolved scheme digest. Inline classifiers retain their original digest format.
     pub fn digest(&self) -> String {
         let mut text = format!(
             "ikigai-judge classifier 1\nprovider {}\nmodel {}\nprompt {}\n",
@@ -97,6 +100,9 @@ impl Classifier {
         );
         for label in &self.labels {
             text.push_str(&format!("label {label}\n"));
+        }
+        if let Some(scheme) = &self.scheme_digest {
+            text.push_str(&format!("scheme {scheme}\n"));
         }
         digest_hex(text.as_bytes())
     }
@@ -109,6 +115,8 @@ pub struct Question {
     pub(crate) name: String,
     pub(crate) labels: Vec<Label>,
     pub(crate) prompt: String,
+    pub(crate) resources: Option<(String, String)>,
+    pub(crate) scheme: Option<String>,
     pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) bayes: Option<String>,
@@ -188,6 +196,8 @@ impl Question {
             name: name.into(),
             labels: out,
             prompt: prompt.into(),
+            resources: None,
+            scheme: None,
             provider: provider.into(),
             model: model.into(),
             bayes: None,
@@ -198,6 +208,29 @@ impl Question {
             curators: Vec::new(),
             product: product.into(),
         })
+    }
+
+    /// A question whose scheme and prompt are Source resources read through the kernel
+    /// under the caller's capability on each invocation. The scheme is UTF-8 JSON with a
+    /// `labels` array of distinct label segments and an optional `examples` value. The
+    /// entire scheme is passed to the model as data and included in its classifier digest.
+    /// Resource failures refuse the invocation; inline defaults are never substituted.
+    pub fn from_resources(
+        name: &str,
+        scheme: &str,
+        prompt: &str,
+        provider: &str,
+        model: &str,
+        product: &str,
+    ) -> Result<Self, ConfigError> {
+        for resource in [scheme, prompt] {
+            ikigai_core::Iri::parse(resource)
+                .map_err(|e| ConfigError(format!("resource `{resource}`: {e}")))?;
+        }
+        let mut q = Self::new(name, ["yes", "no"], "", provider, model, product)?;
+        q.labels.clear();
+        q.resources = Some((scheme.into(), prompt.into()));
+        Ok(q)
     }
 
     /// The ikigai-bayes model (`urn:bayes:{model}:*`) scoring this question; its two labels
@@ -245,13 +278,15 @@ impl Question {
         &self.name
     }
 
-    /// The current classifier.
+    /// The inline classifier. Resource-backed questions must use the kernel
+    /// `urn:iki:judge:classifier:{q}` resource to obtain the resolved classifier.
     pub fn classifier(&self) -> Classifier {
         Classifier {
             provider: self.provider.clone(),
             model: self.model.clone(),
             prompt_digest: digest_hex(self.prompt.as_bytes()),
             labels: self.labels.iter().map(|l| l.name.clone()).collect(),
+            scheme_digest: self.scheme.as_ref().map(|s| digest_hex(s.as_bytes())),
         }
     }
 

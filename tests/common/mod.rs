@@ -45,6 +45,7 @@ pub struct Fake {
     pub text: Mutex<String>,
     pub model: Mutex<String>,
     pub calls: AtomicUsize,
+    pub prompts: Mutex<Vec<String>>,
     pub gate: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
     /// Errors the next calls fail with, in order, after counting the call.
     pub failures: Mutex<Vec<Error>>,
@@ -68,6 +69,10 @@ pub fn fake_llm(fake: Arc<Fake>) -> AsyncFnEndpoint {
         let fake = fake.clone();
         Box::pin(async move {
             fake.calls.fetch_add(1, Ordering::SeqCst);
+            fake.prompts
+                .lock()
+                .unwrap()
+                .push(inv.inline_str("prompt")?.into());
             let gate = fake.gate.lock().unwrap().take();
             if let Some(gate) = gate {
                 gate.await.expect("the test releases the model answer");

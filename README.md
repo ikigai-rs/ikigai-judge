@@ -56,7 +56,7 @@ own question's capability.
 |---|---|---|---|
 | `urn:iki:judge:question:{q}` | Source | the labels as a SKOS concept scheme, the prompt IRI, provider, PINNED model, the bayes model, the daily budget, previous classifiers (Turtle, text) | `urn:cap:judge:read:{q}` |
 | `urn:iki:judge:prompt:{q}` | Source | the prompt text | read |
-| `urn:iki:judge:classifier:{q}` | Source | the current classifier: a digest over (provider, model, prompt digest, labels) | read |
+| `urn:iki:judge:classifier:{q}` | Source | the current classifier: a digest over (provider, model, prompt digest, labels, resolved scheme when configured) | read |
 | `urn:iki:judge:model:{q}:{classifier}:{digest}` | Source | the model verdict atom; NotFound until written | read |
 | `urn:iki:judge:person:{q}:{digest}` | Source | the latest correction in the CALLER's corridor (a caller naming no principal reads the shared view) | read |
 | `urn:iki:judge:class:{q}:{digest}` | Source | the class and the producer that decided (`spam model`, `ham stale <old digest>`, `pending`); a READ, never writes | read |
@@ -122,6 +122,43 @@ retry at <time>`.
   or the call is still in flight) is never retried on its own: the judge refuses it with
   `Conflict`, `pending` lists it as `reserved`, and a curator clears it once the provider's
   outcome is known.
+
+A question may load its scheme and prompt through the kernel instead of embedding them
+in the host build:
+
+```rust
+let contact = ikigai_judge::Question::from_resources(
+    "contact", "urn:example:contact-scheme", "urn:example:contact-prompt",
+    "ollama", "llama3.2:3b", "urn:example:product",
+)?.budget(100);
+```
+
+Both names are Source resources readable under the caller's capability. The prompt is
+UTF-8 text. The scheme is a UTF-8 JSON object, for example:
+
+```json
+{"labels":["spam","ham"],"examples":[{"label":"spam","text":"A confirmed spam example"}]}
+```
+
+Labels follow the inline constructor's rules. `examples` and other scheme fields are data;
+the judge passes the entire scheme with the inquiry in a JSON data envelope after the
+prompt. The host's prompt should explain the scheme and treat inquiry and example text as
+untrusted data. The judge does not persist the resolved scheme, prompt, or inquiry text.
+The host remains responsible for protecting the resources that supply them.
+
+Each composition or write resolves one snapshot before using the labels or classifier.
+The classifier includes a digest of the exact scheme bytes, so changing examples, labels,
+or even JSON formatting changes its identity. Prompt changes also change its identity.
+Kernel reads track resource dependencies for cache invalidation; hosts must supply resources
+with appropriate cache behavior and invalidation. A missing, denied, malformed, non-UTF-8,
+or oversized resource refuses the call before any model budget is reserved. Each resource
+is limited to 65536 bytes, with refusal rather than truncation.
+
+Use `urn:iki:judge:classifier:{q}` to read a resource-backed classifier's digest.
+`Question::classifier()` describes inline configuration and cannot resolve resources.
+Previously recorded model atoms remain readable by their original classifier digest even
+when a resource becomes unreadable. Configure `.previous(...)` explicitly if an old
+classifier should still answer in the current view.
 
 A new model or prompt is a new classifier, so a new name: old verdicts stay readable. List the
 old classifier with `Question::previous` and its verdicts keep answering after the current
