@@ -1815,10 +1815,13 @@ fn reservation_door(q: Arc<Question>, item_locks: Arc<ReservationLocks>) -> Asyn
             }
             let who = principal(inv, &q).to_string();
             if !q.is_curator(&who) {
-                return Err(Error::Denied(format!(
-                    "only a curator of `{}` can clear a reserved model call; {who} is not one",
-                    q.name
-                )));
+                return Err(Error::Denied(
+                    format!(
+                        "only a curator of `{}` can clear a reserved model call; {who} is not one",
+                        q.name
+                    )
+                    .into(),
+                ));
             }
             // The judge's item lock: a clear never lands while this item's call is in flight
             // in this endpoint, so it cannot let a second call start beside the first.
