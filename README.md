@@ -174,6 +174,15 @@ reader's scores. A correction outranks everything, so it resolves a disagreement
 drops out of `disagreements`. The person atom is the same annotation shape, with
 `dcterms:creator` the principal.
 
+When Bayes is configured, a curator must hold `urn:cap:bayes:train:{model}` before
+the judge writes either the shared person atom or the item's last-corrected digest.
+The judge writes the person records before calling Bayes. If training then fails,
+the judge returns the training error and the written verdict stays effective. Once
+the failure is resolved, a curator can submit the same correction again to complete
+training, provided that label is still the intended correction. Bayes training for the
+same text and label is idempotent. A label outside the Bayes model's labels records
+the person verdict and returns success with `bayes not-a-bayes-label` on the text face.
+
 ### Stale verdicts after an edit
 
 When an item's text changes, its new digest has no verdict. The class then answers the

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, AsyncFnEndpoint, Description, EndpointSpace, Error, Exact,
+    ActionSpec, ArgRef, ArgSpec, AsyncFnEndpoint, Denial, Description, EndpointSpace, Error, Exact,
     FailureClass, Invocation, Iri, ReprType, Representation, Request, Result, UriTemplate, Verb,
 };
 use ikigai_fn::html::html_text;
@@ -1904,7 +1904,9 @@ fn correct_door(q: Arc<Question>) -> AsyncFnEndpoint {
          or a curator the host named) writes the shared person atom AND trains the shared bayes \
          model with the same text and label; any other principal's correction writes only that \
          principal's own corridor and trains nothing, so one reader cannot move every reader's \
-         scores. A correction outranks every other verdict, so it resolves a disagreement.",
+         scores. A curator needs the model's training grant before any writes. The shared verdict \
+         can take effect before training completes. A correction outranks every other verdict, \
+         so it resolves a disagreement.",
         Verb::Sink,
         Some(correct_cap(&n)),
         inputs,
@@ -1923,6 +1925,16 @@ fn correct_door(q: Arc<Question>) -> AsyncFnEndpoint {
             })?;
             let who = principal(inv, &q).to_string();
             let curator = q.is_curator(&who);
+            if let (Some(model), true) = (&q.bayes, curator) {
+                // Match the Bayes train endpoint's declared scope before either person write.
+                let scope = format!("urn:cap:bayes:train:{model}");
+                if !inv.capability.satisfies(&scope) {
+                    return Err(Error::Denied(Denial::lacking(
+                        format!("a shared correction requires `{scope}` to train Bayes"),
+                        vec![scope],
+                    )));
+                }
+            }
             let corridor = if curator { q.product.clone() } else { who.clone() };
             let (_, created) = now(inv)?;
             let target = item.target();
