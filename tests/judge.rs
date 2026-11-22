@@ -910,3 +910,31 @@ fn the_why_page_has_a_language_one_main_a_viewport_headings_and_says_which_verdi
     let plain = h.text(Verb::Source, &why_iri(text), &[("content", text)]);
     assert_eq!(plain.matches(" (decided)\n").count(), 1, "{plain}");
 }
+
+#[test]
+fn correction_refused_by_training_leaves_the_verdict_unchanged() {
+    let h = Host::new();
+    let before = h.class(HAMMY, &[]);
+    let bayes_before = h.bayes_digest();
+    let corridor = ikigai_judge::digest_hex(PRODUCT.as_bytes());
+    let cap = Capability::scoped([
+        format!("urn:cap:judge:read:{Q}"),
+        format!("urn:cap:judge:correct:{Q}"),
+        h.fs("read", ""),
+        h.fs("write", &format!("/person/{corridor}")),
+        format!("urn:cap:bayes:read:{Q}"),
+    ])
+    .with_principal("urn:example:curator")
+    .unwrap();
+    let iri = format!("urn:iki:judge:correct:{Q}");
+    let args = [("content", HAMMY), ("label", "spam")];
+    let denied = h.issue_as(&cap, Verb::Sink, &iri, &args).unwrap_err();
+    assert_eq!(denied.lacking(), &[format!("urn:cap:bayes:train:{Q}")]);
+    assert_eq!(h.class(HAMMY, &[]), before);
+    assert_eq!(h.bayes_digest(), bayes_before);
+
+    let curator = h.curator("urn:example:curator");
+    h.issue_as(&curator, Verb::Sink, &iri, &args).unwrap();
+    assert_eq!(h.class(HAMMY, &[]), "spam person-shared\n");
+    assert_ne!(h.bayes_digest(), bayes_before);
+}
