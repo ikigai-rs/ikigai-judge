@@ -576,9 +576,58 @@ fn a_failed_item_reservation_never_calls_the_model() {
         .is_err());
     assert_eq!(h.fake.calls(), 0);
     assert_eq!(h.class(HAMMY, &[]), "pending\n");
+    assert_eq!(
+        h.text(
+            Verb::Source,
+            &format!("urn:iki:judge:spent:{Q}:form:2026-10-31"),
+            &[],
+        ),
+        "spent 0 of 100\n"
+    );
     // A reservation that was never saved must not strand the item.
     h.judge(HAMMY, &[]).unwrap();
     assert_eq!(h.fake.calls(), 1);
+    assert_eq!(
+        h.text(
+            Verb::Source,
+            &format!("urn:iki:judge:spent:{Q}:form:2026-10-31"),
+            &[],
+        ),
+        "spent 1 of 100\n"
+    );
+}
+
+#[test]
+fn a_failed_budget_debit_leaves_the_reservation_for_a_curator() {
+    let h = Host::new();
+    let cap = Capability::scoped([
+        format!("urn:cap:judge:read:{Q}"),
+        format!("urn:cap:judge:judge:{Q}"),
+        h.fs("read", ""),
+        h.fs("write", &format!("/model/{Q}/reserved")),
+        format!("urn:cap:bayes:read:{Q}"),
+    ]);
+    assert!(h
+        .issue_as(
+            &cap,
+            Verb::Sink,
+            &format!("urn:iki:judge:judge:{Q}"),
+            &[("content", HAMMY), ("source", "form")]
+        )
+        .is_err());
+    assert!(matches!(
+        h.judge(HAMMY, &[]),
+        Err(Error::Conflict(detail)) if detail.contains("a curator can clear it")
+    ));
+    assert_eq!(h.fake.calls(), 0);
+    assert_eq!(
+        h.text(
+            Verb::Source,
+            &format!("urn:iki:judge:spent:{Q}:form:2026-10-31"),
+            &[],
+        ),
+        "spent 0 of 100\n"
+    );
 }
 
 #[test]

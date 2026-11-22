@@ -1650,20 +1650,20 @@ fn judge_door(q: Arc<Question>, item_locks: Arc<ReservationLocks>) -> AsyncFnEnd
                     ),
                 });
             }
-            // Spend before asking: a call that fails or answers off-label is still spent.
-            write_atom(
-                inv,
-                &atoms::spent_path(&q.name, &source, &date),
-                &atoms::spent_turtle(&spent_name(&q.name, &source, &date), used + 1),
-            )
-            .await?;
-            // Persist the item reservation before the paid side effect. Retain it on
-            // failure: without a verdict we cannot know whether retrying would pay twice.
+            // Save the item reservation first so a refused write consumes no budget.
             let name = model_name(&q.name, &classifier, &item.digest);
             write_atom(
                 inv,
                 &reservation_path,
                 &atoms::reservation_turtle(&reservation_path, &name, &created, attempt, None),
+            )
+            .await?;
+            // Debit before asking: a call that fails or answers off-label still counts.
+            // If this write fails, retain the reservation for a curator to clear.
+            write_atom(
+                inv,
+                &atoms::spent_path(&q.name, &source, &date),
+                &atoms::spent_turtle(&spent_name(&q.name, &source, &date), used + 1),
             )
             .await?;
             drop(reservation);
