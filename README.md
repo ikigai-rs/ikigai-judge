@@ -231,11 +231,12 @@ call before asking the model. It releases the budget lock before the model reque
 unrelated items can proceed. A separate lock for each classifier and content digest covers
 the verdict read, budget reservation, model request, and verdict writes. A caller waiting
 for the same item re-reads its verdict before reserving any budget, including when callers
-name different sources. Before asking, both the budget charge and a durable item reservation
-are persisted while holding both locks. A budget refusal returns `RetryAfter` with the delay
-until the next UTC day. Failed calls still spend their reservation, and a retry spends
-another. A failed reservation write also retains the conservative budget charge, but the model
-is not called.
+name different sources. While holding both locks, the judge checks the budget, saves the item
+reservation, then debits the budget before asking the model. A budget refusal returns
+`RetryAfter` with the delay until the next UTC day. Failed model calls still spend their
+reservation, and a retry spends another. A failed item reservation write leaves the budget
+untouched. If the debit write fails after the reservation is saved, the judge stops before
+calling the model and the saved reservation waits for a curator to clear it.
 
 A reservation without a verdict refuses later attempts without another charge or model call,
 including after an endpoint restart: with `RetryAfter` until its recorded failure's retry
