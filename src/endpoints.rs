@@ -1888,14 +1888,19 @@ fn reservation_door(q: Arc<Question>, item_locks: Arc<ReservationLocks>) -> Asyn
 fn correct_door(q: Arc<Question>) -> AsyncFnEndpoint {
     let correction_locks = Arc::new(ReservationLocks::default());
     let n = q.name.clone();
-    let mut inputs = vec![
-        content_spec(),
+    // A resource-backed question's labels are its scheme's, read on each call: none are
+    // known here, and an empty enumeration would declare that no label is accepted.
+    let label_spec = if q.resources.is_some() {
+        ArgSpec::new("label")
+            .summary("the correct label: one of the labels of the question's scheme resource")
+            .class(xsd("string"))
+    } else {
         ArgSpec::new("label")
             .summary("the correct label")
             .class(xsd("string"))
-            .one_of(q.labels.iter().map(|l| l.name.clone())),
-        item_spec(),
-    ];
+            .one_of(q.labels.iter().map(|l| l.name.clone()))
+    };
+    let mut inputs = vec![content_spec(), label_spec, item_spec()];
     inputs.push(as_spec(&PLAIN_FACES));
     let d = describe(
         &format!("judge-{n}-correct"),
