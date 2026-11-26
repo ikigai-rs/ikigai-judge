@@ -216,3 +216,46 @@ fn unreadable_oversized_and_non_utf8_resources_refuse_before_spending() {
         "spent 0 of 100\n"
     );
 }
+
+/// The correct door's declared contract must accept the labels it enforces. A
+/// resource-backed question has no labels until its scheme is read, so declaring them as an
+/// enumeration at bind time declares an empty one: a contract that accepts no label at all,
+/// while the door itself accepts every label of the resolved scheme.
+#[test]
+fn a_resource_backed_correct_door_declares_the_labels_it_accepts() {
+    let h = resource_host();
+    h.correct_as(&Capability::root(), "hello", "ham", &[]);
+    let report = h.text(
+        Verb::Source,
+        "urn:kernel:validate",
+        &[
+            ("endpoint", &format!("urn:iki:judge:correct:{Q}")),
+            ("verb", "sink"),
+            ("args", "content=hello&label=ham"),
+        ],
+    );
+    assert!(
+        report.contains("sh:conforms true"),
+        "the door accepted `ham`, so its contract must too: {report}"
+    );
+}
+
+/// An inline question still declares its closed set, and the contract refuses a label
+/// outside it.
+#[test]
+fn an_inline_correct_door_declares_its_closed_label_set() {
+    let h = Host::new();
+    let validate = |label: &str| {
+        h.text(
+            Verb::Source,
+            "urn:kernel:validate",
+            &[
+                ("endpoint", &format!("urn:iki:judge:correct:{Q}")),
+                ("verb", "sink"),
+                ("args", &format!("content=hello&label={label}")),
+            ],
+        )
+    };
+    assert!(validate("ham").contains("sh:conforms true"));
+    assert!(validate("maybe").contains("sh:conforms false"));
+}
